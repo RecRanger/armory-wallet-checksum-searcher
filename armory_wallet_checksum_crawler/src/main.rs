@@ -20,6 +20,10 @@ struct Args {
 
     #[clap(short, long, value_parser)]
     output: PathBuf,
+
+    // block size in KiB, alias --block-size
+    #[clap(short, long="block-size", default_value = "10240")]
+    block_size_kibibytes: usize,
 }
 
 fn sha256(data: &[u8]) -> Vec<u8> {
@@ -232,7 +236,7 @@ fn main() -> io::Result<()> {
     info!("Version: {}", env!("CARGO_PKG_VERSION"));
 
     info!("Starting processing of file: {:?}", args.file);
-    let block_size_bytes = 10 * 1024 * 1024;
+    let block_size_bytes = args.block_size_kibibytes * 1024;
 
     let checksum_patterns = vec![
         ChecksumPatternSpec { chunk_len: 16, checksum_len: 4 }, // Initialization Vector (IV)
@@ -242,7 +246,7 @@ fn main() -> io::Result<()> {
         ChecksumPatternSpec { chunk_len: 65, checksum_len: 4 }, // "Public Key"
         ChecksumPatternSpec { chunk_len: 38, checksum_len: 4 }, // an arbitrary-length searcher to act as a "control"
     ];
-    info!("Using search queries: {:?}", checksum_patterns);
+    info!("Using checksum patterns: {:?}", checksum_patterns);
     
     info!("Using block size: {} bytes = {} MiB", block_size_bytes, (block_size_bytes as f32 / 1024.0 / 1024.0));
     process_file(&args.file, block_size_bytes, &checksum_patterns)?;

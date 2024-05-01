@@ -5,6 +5,7 @@ use sha2::{Sha256, Digest};
 use lz4_flex::frame::FrameDecoder;
 use clap::Parser;
 use std::path::PathBuf;
+use indexmap::IndexMap;
 
 use fern::Dispatch;
 use log::{info, error};
@@ -35,12 +36,16 @@ fn compute_checksum(data: &[u8], len: usize) -> Vec<u8> {
     hash256(data)[..len].to_vec()
 }
 
+struct ChecksumPatternMatch {
+    checksum_pattern: ChecksumPatternSpec,
+    offset: i64,
+}
 
-fn search_block_for_checksum(block: &[u8], block_start_idx: i64, search_queries: &[SearchQuery]) -> usize {
-    let mut success_count = 0;
+fn search_block_for_checksum(block: &[u8], block_start_idx: i64, checksum_patterns: &[ChecksumPatternSpec]) -> Vec<ChecksumPatternMatch> {
+    let mut matches: Vec<ChecksumPatternMatch> = Vec::new();
     
     for i in 0..block.len() {
-        for SearchQuery { chunk_len, checksum_len } in search_queries {
+        for ChecksumPatternSpec { chunk_len, checksum_len } in checksum_patterns {
             if i + chunk_len + checksum_len > block.len() {
                 // We're at the end, and it's too long to match
                 // This method wastes a few loop cycles at the end, but it's easier than setting the upper bound of the loop smartly.
@@ -62,23 +67,27 @@ fn search_block_for_checksum(block: &[u8], block_start_idx: i64, search_queries:
             let hash_result = compute_checksum(chunk, *checksum_len);
 
             if hash_result == checksum {
+                let match_offset = block_start_idx + (i as i64);
                 info!("✅ Match! Offset in File: {}=0x{:x}, Chunk Length: {}, Chunk: {:x?}, Hash: {:x?}",
-                    block_start_idx + (i as i64), block_start_idx + (i as i64),
+                    match_offset, match_offset,
                     chunk_len,
                     chunk,
                     hash_result
                 );
 
-                success_count += 1;
+                matches.push(ChecksumPatternMatch {
+                    checksum_pattern: ChecksumPatternSpec { chunk_len: *chunk_len, checksum_len: *checksum_len },
+                    offset: match_offset,
+                });
             }
         }
     }
     
-    success_count
+    matches
 }
 
 
-fn process_file(file_path: &PathBuf, block_size: usize, search_queries: &[SearchQuery]) -> io::Result<()> {
+fn process_file(file_path: &PathBuf, block_size: usize, checksum_patterns: &[ChecksumPatternSpec]) -> io::Result<()> {
     let file = File::open(file_path)?;
     let mut reader: Box<dyn Read> = if file_path.extension().and_then(std::ffi::OsStr::to_str) == Some("lz4") {
         info!("Detected LZ4 file. Using LZ4 frame decoder.");
@@ -88,7 +97,7 @@ fn process_file(file_path: &PathBuf, block_size: usize, search_queries: &[Search
         Box::new(BufReader::new(file))
     };
 
-    let longest_chunk_and_checksum_bytes: usize = search_queries.iter().map(|q| q.chunk_len + q.checksum_len).max().unwrap();
+    let longest_chunk_and_checksum_bytes: usize = checksum_patterns.iter().map(|q| q.chunk_len + q.checksum_len).max().unwrap();
     info!("Longest chunk and checksum bytes: {}", longest_chunk_and_checksum_bytes);
 
     let overlap_length = longest_chunk_and_checksum_bytes; // maybe this should be "-1", but doesn't matter
@@ -101,6 +110,13 @@ fn process_file(file_path: &PathBuf, block_size: usize, search_queries: &[Search
     let mut block_start_idx: i64 = -(overlap_length as i64);
     let mut total_bytes_read = 0;
     let mut last_log_time = Instant::now();
+
+    // Populating the IndexMap with 0-counts at start.
+    // Using an IndexMap instead of a HashMap to keep the order of insertion.
+    let mut checksum_pattern_success_count: IndexMap<String, i32> = IndexMap::new();
+    for checksum_pattern in checksum_patterns {
+        checksum_pattern_success_count.insert(checksum_pattern.to_string(), 0);
+    }
 
     loop {
         let had_success_this_time;
@@ -121,11 +137,19 @@ fn process_file(file_path: &PathBuf, block_size: usize, search_queries: &[Search
                 total_bytes_read += read_size;
                 
                 // DO THE SEARCH:
-                let success_count_this_time = search_block_for_checksum(
-                    &block[..read_size], block_start_idx, search_queries);
+                let pattern_matches = search_block_for_checksum(
+                    &block[..read_size], block_start_idx, checksum_patterns);
 
-                had_success_this_time = success_count_this_time > 0;
-                total_success_count += success_count_this_time;
+                // Update success counts
+                had_success_this_time = pattern_matches.len() > 0;
+                total_success_count += pattern_matches.len();
+                for pattern_match in pattern_matches {
+                    let pattern_str = pattern_match.checksum_pattern.to_string();
+                    let count = checksum_pattern_success_count.entry(pattern_str).or_insert(0);
+                    *count += 1;
+                }
+
+                // Update block_start_idx for the next iteration
                 block_start_idx += n as i64;
 
                 // Update overlap for the next iteration
@@ -144,11 +168,14 @@ fn process_file(file_path: &PathBuf, block_size: usize, search_queries: &[Search
             let time_elapsed = start_time.elapsed().as_secs_f32();
             let bytes_per_sec = total_bytes_read as f32 / time_elapsed;
 
-            info!("PROGRESS: {} bytes = {} MiB read @ {:.2} KiB/sec. Total successes: {}. ",
+            info!("PROGRESS: {} bytes = {} MiB = {} GiB read @ {:.2} KiB/sec. Successes: {} = {:?}",
                 total_bytes_read,
-                (total_bytes_read as f32 / 1024.0 / 1024.0).round(),
+                (total_bytes_read as f32 / 1024.0 / 1024.0 * 10.0).round() / 10.0,
+                (total_bytes_read as f32 / 1024.0 / 1024.0 / 1024.0 * 10.0).round() / 10.0,
                 bytes_per_sec / 1024.0,
-                total_success_count);
+                total_success_count,
+                checksum_pattern_success_count,
+            );
             last_log_time = Instant::now();
         }
     }
@@ -179,10 +206,16 @@ fn setup_logger(log_file: &PathBuf) -> Result<(), fern::InitError> {
 }
 
 #[derive(Debug)]
-struct SearchQuery {
+struct ChecksumPatternSpec {
     chunk_len: usize,
     checksum_len: usize,
-    // TODO: could add hash function here, if we wanted
+    // TODO: could add hash function field here, if we wanted
+}
+
+impl ChecksumPatternSpec {
+    fn to_string(&self) -> String {
+        format!("{}+{}", self.chunk_len, self.checksum_len)
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -201,17 +234,18 @@ fn main() -> io::Result<()> {
     info!("Starting processing of file: {:?}", args.file);
     let block_size_bytes = 10 * 1024 * 1024;
 
-    let search_queries = vec![
-        SearchQuery { chunk_len: 16, checksum_len: 4 }, // Initialization Vector (IV)
-        SearchQuery { chunk_len: 20, checksum_len: 4 }, // Public Key Hash160 (Address)
-        SearchQuery { chunk_len: 32, checksum_len: 4 }, // ChainCode and PrivKey
-        SearchQuery { chunk_len: 44, checksum_len: 4 }, // KdfParameters: function width of the KDF parameters block
-        SearchQuery { chunk_len: 65, checksum_len: 4 }, // "Public Key"
+    let checksum_patterns = vec![
+        ChecksumPatternSpec { chunk_len: 16, checksum_len: 4 }, // Initialization Vector (IV)
+        ChecksumPatternSpec { chunk_len: 20, checksum_len: 4 }, // Public Key Hash160 (Address)
+        ChecksumPatternSpec { chunk_len: 32, checksum_len: 4 }, // ChainCode and PrivKey
+        ChecksumPatternSpec { chunk_len: 44, checksum_len: 4 }, // KdfParameters: function width of the KDF parameters block
+        ChecksumPatternSpec { chunk_len: 65, checksum_len: 4 }, // "Public Key"
+        ChecksumPatternSpec { chunk_len: 38, checksum_len: 4 }, // an arbitrary-length searcher to act as a "control"
     ];
-    info!("Using search queries: {:?}", search_queries);
+    info!("Using search queries: {:?}", checksum_patterns);
     
-    info!("Using block size: {} bytes = {} MiB", block_size_bytes, (block_size_bytes as f32 / 1024.0 / 1024.0).round());
-    process_file(&args.file, block_size_bytes, &search_queries)?;
+    info!("Using block size: {} bytes = {} MiB", block_size_bytes, (block_size_bytes as f32 / 1024.0 / 1024.0));
+    process_file(&args.file, block_size_bytes, &checksum_patterns)?;
 
     Ok(())
 }

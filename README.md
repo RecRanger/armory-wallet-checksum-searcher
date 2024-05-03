@@ -1,6 +1,6 @@
 # armory-wallet-checksum-searcher
 
-A tool to locate Armory wallets on corrupted and deleted hard drives.
+A tool to locate and extract Armory wallets on corrupted and deleted hard drives.
 
 ## Features
 
@@ -22,8 +22,17 @@ A tool to locate Armory wallets on corrupted and deleted hard drives.
 
 ## Usage
 
+Install from crates.io, and then run:
+
 ```bash
-cd armory_wallet_checksum_crawler
+cargo install armory_wallet_checksum_searcher
+armory_wallet_checksum_searcher -f input_file.img -o ./output_log.log
+```
+
+Or, clone from source and run:
+
+```bash
+git clone https://github.com/RecRanger/armory-wallet-checksum-searcher
 cargo run --release -- -f input_file.img -o ./output_log.log
 sudo cargo run --release -- -f /dev/sda -o ./output_log.log
 ```

@@ -1,0 +1,25 @@
+[package]
+name = "armory_wallet_checksum_searcher"
+description = "A tool to locate and extract Armory wallets on corrupted and deleted hard drives"
+version = "0.2.6"
+edition = "2021"
+
+readme = "README.md"
+repository = "https://github.com/RecRanger/armory-wallet-checksum-searcher.git"
+homepage = "https://github.com/RecRanger/armory-wallet-checksum-searcher"
+license = "BSD-3-Clause"
+authors = ["RecRanger <recranger+cratesio@proton.me>"]
+
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+lz4_flex = "0.11.3"
+sha2 = "0.10.8"
+log = "0.4.21"
+simple_logger = "1.16.0"
+clap = { version = "3.1.18", features = ["derive"] }
+chrono = "0.4.38"
+fern = "0.6.2"
+humantime = "2.1.0"
+indexmap = "2.2.6"

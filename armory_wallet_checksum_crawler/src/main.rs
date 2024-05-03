@@ -1,6 +1,8 @@
 use std::fs::File;
 use std::io::{self, BufReader, Read};
-use std::time::{Instant, Duration};
+use std::collections::VecDeque;
+use std::time::{SystemTime, Instant, Duration};
+
 use sha2::{Sha256, Digest};
 use lz4_flex::frame::FrameDecoder;
 use clap::Parser;
@@ -8,8 +10,7 @@ use std::path::PathBuf;
 use indexmap::IndexMap;
 
 use fern::Dispatch;
-use log::{info, error};
-use std::time::SystemTime;
+use log::{info, warn, error};
 
 
 #[derive(Parser, Debug)]
@@ -42,6 +43,8 @@ fn compute_checksum(data: &[u8], len: usize) -> Vec<u8> {
 
 struct ChecksumPatternMatch {
     checksum_pattern: ChecksumPatternSpec,
+
+    #[allow(dead_code)]
     offset: i64,
 }
 
@@ -114,6 +117,7 @@ fn process_file(file_path: &PathBuf, block_size: usize, checksum_patterns: &[Che
     let mut block_start_idx: i64 = -(overlap_length as i64);
     let mut total_bytes_read = 0;
     let mut last_log_time = Instant::now();
+    let mut recent_speeds: VecDeque<(Instant, f32)> = VecDeque::new();
 
     // Populating the IndexMap with 0-counts at start.
     // Using an IndexMap instead of a HashMap to keep the order of insertion.
@@ -122,8 +126,10 @@ fn process_file(file_path: &PathBuf, block_size: usize, checksum_patterns: &[Che
         checksum_pattern_success_count.insert(checksum_pattern.to_string(), 0);
     }
 
+    // Loop through each "block" of data from the file
     loop {
-        let had_success_this_time;
+        let had_success_this_block;
+        let start_time_this_block = Instant::now();
 
         // Prepend overlap if not the first read
         if !initial_read {
@@ -145,7 +151,7 @@ fn process_file(file_path: &PathBuf, block_size: usize, checksum_patterns: &[Che
                     &block[..read_size], block_start_idx, checksum_patterns);
 
                 // Update success counts
-                had_success_this_time = pattern_matches.len() > 0;
+                had_success_this_block = pattern_matches.len() > 0;
                 total_success_count += pattern_matches.len();
                 for pattern_match in pattern_matches {
                     let pattern_str = pattern_match.checksum_pattern.to_string();
@@ -158,6 +164,10 @@ fn process_file(file_path: &PathBuf, block_size: usize, checksum_patterns: &[Che
 
                 // Update overlap for the next iteration
                 overlap.copy_from_slice(&block[read_size - overlap_length..read_size]);
+
+                // Update recent speeds
+                let this_block_speed_bytes_per_sec = read_size as f32 / start_time_this_block.elapsed().as_secs_f32();
+                recent_speeds.push_back((Instant::now(), this_block_speed_bytes_per_sec));  
             }
             Err(e) => {
                 error!("Error reading data: {:?}", e);
@@ -168,15 +178,27 @@ fn process_file(file_path: &PathBuf, block_size: usize, checksum_patterns: &[Che
         initial_read = false;
 
         // log progress
-        if last_log_time.elapsed() > Duration::from_secs(45) || had_success_this_time {
+        if last_log_time.elapsed() > Duration::from_secs(45) || had_success_this_block {
             let time_elapsed = start_time.elapsed().as_secs_f32();
             let bytes_per_sec = total_bytes_read as f32 / time_elapsed;
 
-            info!("PROGRESS: {} bytes = {} MiB = {} GiB read @ {:.2} KiB/sec. Successes: {} = {:?}",
+            // Remove old entries that are outside the 60-second window, then compute the average speed
+            while recent_speeds.front().map_or(false, |&(time, _)| Instant::now().duration_since(time) > Duration::from_secs(60)) {
+                recent_speeds.pop_front();
+            }
+            let average_speed_bytes_per_sec = if recent_speeds.is_empty() {
+                warn!("No recent speeds to compute SMA. Using 0.0 KiB/sec. Seems like the process is stuck/halted.");
+                0.0
+            } else {
+                recent_speeds.iter().map(|&(_, speed)| speed).sum::<f32>() / recent_speeds.len() as f32
+            };
+
+            info!("PROGRESS: {} bytes = {} MiB = {} GiB read @ {:.1}|{:.1} KiB/sec (all|60sec). Successes: {} = {:?}",
                 total_bytes_read,
                 (total_bytes_read as f32 / 1024.0 / 1024.0 * 10.0).round() / 10.0,
                 (total_bytes_read as f32 / 1024.0 / 1024.0 / 1024.0 * 10.0).round() / 10.0,
                 bytes_per_sec / 1024.0,
+                average_speed_bytes_per_sec / 1024.0,
                 total_success_count,
                 checksum_pattern_success_count,
             );

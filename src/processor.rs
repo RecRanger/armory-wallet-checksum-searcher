@@ -78,6 +78,8 @@ fn search_block_for_checksum(block: &[u8], block_start_idx: i64, checksum_patter
 pub fn process_file(file_path: &PathBuf, block_size: usize, checksum_patterns: &[ChecksumPatternSpec]) -> io::Result<()> {
     let file = File::open(file_path)?;
     let mut reader: Box<dyn Read> = if file_path.extension().and_then(std::ffi::OsStr::to_str) == Some("lz4") {
+        // has a '.lz4' extension
+        // '.img.lz4' files ARE detected here as LZ4 files (despite the composite extension)
         info!("Detected LZ4 file. Using LZ4 frame decoder.");
         Box::new(FrameDecoder::new(file))
     } else {

@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "armory_wallet_checksum_searcher"
-version = "0.2.6"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "clap",

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use indexmap::IndexMap;
+use indicatif::{ProgressBar, ProgressStyle};
 use memmap2::Mmap;
 use sha2::{Digest, Sha256};
 
@@ -11,7 +12,7 @@ use log::info;
 
 use crate::types::{ChecksumPatternMatch, ChecksumPatternSpec};
 
-fn sha256(data: &[u8]) -> [u8; 32]{
+fn sha256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().into()
@@ -31,7 +32,21 @@ fn search_for_checksums(
 ) -> Vec<ChecksumPatternMatch> {
     let mut matches: Vec<ChecksumPatternMatch> = Vec::new();
 
+    // Create progress bar.
+    let progress_bar = ProgressBar::new(data.len() as u64);
+    progress_bar.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({binary_bytes_per_sec}) - ETA {eta}")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+
     for chunk_start_idx in 0..data.len() {
+        // Update progress bar every 1MB to avoid overhead.
+        if chunk_start_idx % 1_000_000 == 0 {
+            progress_bar.set_position(chunk_start_idx as u64);
+        }
+
         for ChecksumPatternSpec {
             chunk_len,
             checksum_len,
@@ -72,6 +87,8 @@ fn search_for_checksums(
             }
         }
     }
+
+    progress_bar.finish_with_message("Search complete");
 
     matches
 }

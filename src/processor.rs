@@ -42,8 +42,8 @@ fn search_for_checksums(
     );
 
     for chunk_start_idx in 0..data.len() {
-        // Update progress bar every 1MB to avoid overhead.
-        if chunk_start_idx % 1_000_000 == 0 {
+        // Update progress bar every 2MB to avoid overhead.
+        if chunk_start_idx % 2_000_000 == 0 {
             progress_bar.set_position(chunk_start_idx as u64);
         }
 
@@ -52,26 +52,26 @@ fn search_for_checksums(
                 continue;
             }
 
-            let chunk = &data[chunk_start_idx..chunk_start_idx + (pattern.chunk_len as usize)];
-            let checksum = &data[chunk_start_idx + (pattern.chunk_len as usize)
-                ..chunk_start_idx + pattern.total_length() as usize];
+            let chunk_and_checksum =
+                &data[chunk_start_idx..chunk_start_idx + pattern.total_length() as usize];
 
-            // Skip if chunk is all zeros.
-            if chunk.iter().all(|&x| x == 0) {
+            // Skip if chunk and checksum are all zeros.
+            if chunk_and_checksum.iter().all(|&x| x == 0) {
                 continue;
             }
 
-            // Skip if checksum is all zeros.
-            if checksum.iter().all(|&x| x == 0) {
-                continue;
-            }
+            let hash_result = compute_checksum(&chunk_and_checksum[..pattern.chunk_len]);
 
-            let hash_result = compute_checksum(chunk);
-
-            if hash_result == checksum {
+            if hash_result[..pattern.checksum_len]
+                == chunk_and_checksum[pattern.chunk_len..pattern.total_length()]
+            {
                 info!(
                     "✅ Match! Offset: {}=0x{:x}, Chunk Length: {}, Chunk: {:x?}, Hash: {:x?}",
-                    chunk_start_idx, chunk_start_idx, pattern.chunk_len, chunk, hash_result
+                    chunk_start_idx,
+                    chunk_start_idx,
+                    pattern.chunk_len,
+                    chunk_and_checksum[..pattern.chunk_len].to_vec(),
+                    hash_result
                 );
 
                 matches.push(ChecksumPatternMatch {

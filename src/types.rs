@@ -4,8 +4,8 @@ use serde::Serialize;
 
 #[derive(Debug, Clone)]
 pub struct ChecksumPatternSpec {
-    pub chunk_len: u16,
-    pub checksum_len: u16,
+    pub chunk_len: usize,
+    pub checksum_len: usize,
     // TODO: Could add hash function field here, if we wanted.
 }
 
@@ -25,10 +25,10 @@ impl FromStr for ChecksumPatternSpec {
         }
 
         let chunk_len = parts[0]
-            .parse::<u16>()
+            .parse::<usize>()
             .map_err(|e| format!("Invalid chunk length: {}", e))?;
         let checksum_len = parts[1]
-            .parse::<u16>()
+            .parse::<usize>()
             .map_err(|e| format!("Invalid checksum length: {}", e))?;
 
         Ok(ChecksumPatternSpec {
@@ -39,15 +39,15 @@ impl FromStr for ChecksumPatternSpec {
 }
 
 impl ChecksumPatternSpec {
-    pub fn total_length(&self) -> u16 {
+    pub fn total_length(&self) -> usize {
         self.chunk_len + self.checksum_len
     }
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChecksumPatternMatch {
-    pub chunk_len: u16,
-    pub checksum_len: u16,
+    pub chunk_len: usize,
+    pub checksum_len: usize,
 
     pub chunk_start_offset: u64,
 }

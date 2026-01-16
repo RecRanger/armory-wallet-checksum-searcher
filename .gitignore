@@ -1,8 +1,9 @@
-# ignore files used for the program itself
+# Ignore files used for the program itself.
 *.log
 *.lz4
 *.img
 *.bin
+*.ndjson
 
 
 # Rust Gitignore Template

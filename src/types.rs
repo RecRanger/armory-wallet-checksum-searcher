@@ -1,10 +1,12 @@
 use std::str::FromStr;
+use serde::Serialize;
+
 
 #[derive(Debug, Clone)]
 pub struct ChecksumPatternSpec {
-    pub chunk_len: usize,
-    pub checksum_len: usize,
-    // TODO: could add hash function field here, if we wanted
+    pub chunk_len: u16,
+    pub checksum_len: u16,
+    // TODO: Could add hash function field here, if we wanted.
 }
 
 impl ToString for ChecksumPatternSpec {
@@ -23,10 +25,10 @@ impl FromStr for ChecksumPatternSpec {
         }
 
         let chunk_len = parts[0]
-            .parse::<usize>()
+            .parse::<u16>()
             .map_err(|e| format!("Invalid chunk length: {}", e))?;
         let checksum_len = parts[1]
-            .parse::<usize>()
+            .parse::<u16>()
             .map_err(|e| format!("Invalid checksum length: {}", e))?;
 
         Ok(ChecksumPatternSpec {
@@ -36,9 +38,16 @@ impl FromStr for ChecksumPatternSpec {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub struct ChecksumPatternMatch {
-    pub checksum_pattern: ChecksumPatternSpec,
+    pub chunk_len: u16,
+    pub checksum_len: u16,
 
-    #[allow(dead_code)]
-    pub offset: i64,
+    pub chunk_start_offset: u64,
+}
+
+impl ChecksumPatternMatch {
+    pub fn to_checksum_pattern_string(&self) -> String {
+        format!("{}+{}", self.chunk_len, self.checksum_len)
+    }
 }

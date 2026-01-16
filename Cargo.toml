@@ -14,7 +14,6 @@ authors = ["RecRanger <recranger+cratesio@proton.me>"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-lz4_flex = "0.11.3"
 sha2 = "0.10.8"
 log = "0.4.21"
 simple_logger = "1.16.0"
@@ -23,3 +22,8 @@ chrono = "0.4.38"
 fern = "0.6.2"
 humantime = "2.1.0"
 indexmap = "2.2.6"
+memmap2 = "0.9.9"
+
+# Writing to JSON.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -44,7 +44,7 @@ impl ChecksumPatternSpec {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ChecksumPatternMatch {
     pub chunk_len: usize,
     pub checksum_len: usize,

@@ -1,18 +1,16 @@
-
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufReader, Read};
-use std::collections::VecDeque;
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 
-use sha2::{Sha256, Digest};
-use lz4_flex::frame::FrameDecoder;
-use std::path::PathBuf;
 use indexmap::IndexMap;
+use lz4_flex::frame::FrameDecoder;
+use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 
-use log::{info, warn, error};
+use log::{error, info, warn};
 
-use crate::types::{ChecksumPatternSpec, ChecksumPatternMatch};
-
+use crate::types::{ChecksumPatternMatch, ChecksumPatternSpec};
 
 fn sha256(data: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
@@ -28,12 +26,19 @@ fn compute_checksum(data: &[u8], len: usize) -> Vec<u8> {
     hash256(data)[..len].to_vec()
 }
 
-
-fn search_block_for_checksum(block: &[u8], block_start_idx: i64, checksum_patterns: &[ChecksumPatternSpec]) -> Vec<ChecksumPatternMatch> {
+fn search_block_for_checksum(
+    block: &[u8],
+    block_start_idx: i64,
+    checksum_patterns: &[ChecksumPatternSpec],
+) -> Vec<ChecksumPatternMatch> {
     let mut matches: Vec<ChecksumPatternMatch> = Vec::new();
-    
+
     for i in 0..block.len() {
-        for ChecksumPatternSpec { chunk_len, checksum_len } in checksum_patterns {
+        for ChecksumPatternSpec {
+            chunk_len,
+            checksum_len,
+        } in checksum_patterns
+        {
             if i + chunk_len + checksum_len > block.len() {
                 // We're at the end, and it's too long to match
                 // This method wastes a few loop cycles at the end, but it's easier than setting the upper bound of the loop smartly.
@@ -64,20 +69,28 @@ fn search_block_for_checksum(block: &[u8], block_start_idx: i64, checksum_patter
                 );
 
                 matches.push(ChecksumPatternMatch {
-                    checksum_pattern: ChecksumPatternSpec { chunk_len: *chunk_len, checksum_len: *checksum_len },
+                    checksum_pattern: ChecksumPatternSpec {
+                        chunk_len: *chunk_len,
+                        checksum_len: *checksum_len,
+                    },
                     offset: match_offset,
                 });
             }
         }
     }
-    
+
     matches
 }
 
-
-pub fn process_file(file_path: &PathBuf, block_size: usize, checksum_patterns: &[ChecksumPatternSpec]) -> io::Result<()> {
+pub fn process_file(
+    file_path: &PathBuf,
+    block_size: usize,
+    checksum_patterns: &[ChecksumPatternSpec],
+) -> io::Result<()> {
     let file = File::open(file_path)?;
-    let mut reader: Box<dyn Read> = if file_path.extension().and_then(std::ffi::OsStr::to_str) == Some("lz4") {
+    let mut reader: Box<dyn Read> = if file_path.extension().and_then(std::ffi::OsStr::to_str)
+        == Some("lz4")
+    {
         // has a '.lz4' extension
         // '.img.lz4' files ARE detected here as LZ4 files (despite the composite extension)
         info!("Detected LZ4 file. Using LZ4 frame decoder.");
@@ -87,8 +100,15 @@ pub fn process_file(file_path: &PathBuf, block_size: usize, checksum_patterns: &
         Box::new(BufReader::new(file))
     };
 
-    let longest_chunk_and_checksum_bytes: usize = checksum_patterns.iter().map(|q| q.chunk_len + q.checksum_len).max().unwrap();
-    info!("Longest chunk and checksum bytes: {}", longest_chunk_and_checksum_bytes);
+    let longest_chunk_and_checksum_bytes: usize = checksum_patterns
+        .iter()
+        .map(|q| q.chunk_len + q.checksum_len)
+        .max()
+        .unwrap();
+    info!(
+        "Longest chunk and checksum bytes: {}",
+        longest_chunk_and_checksum_bytes
+    );
 
     let overlap_length = longest_chunk_and_checksum_bytes; // maybe this should be "-1", but doesn't matter
     let mut block = vec![0u8; block_size + overlap_length];
@@ -122,23 +142,30 @@ pub fn process_file(file_path: &PathBuf, block_size: usize, checksum_patterns: &
         // Read data into the block after the overlap
         match reader.read(&mut block[overlap_length..]) {
             Ok(0) => {
-                info!("No data was read this time, meaning we reached the end of the file. Breaking!");
-                break // Break if no data was read
+                info!(
+                    "No data was read this time, meaning we reached the end of the file. Breaking!"
+                );
+                break; // Break if no data was read
             }
             Ok(n) => {
                 let read_size = overlap_length + n; // Total data size including overlap
                 total_bytes_read += read_size;
-                
+
                 // DO THE SEARCH:
                 let pattern_matches = search_block_for_checksum(
-                    &block[..read_size], block_start_idx, checksum_patterns);
+                    &block[..read_size],
+                    block_start_idx,
+                    checksum_patterns,
+                );
 
                 // Update success counts
                 had_success_this_block = pattern_matches.len() > 0;
                 total_success_count += pattern_matches.len();
                 for pattern_match in pattern_matches {
                     let pattern_str = pattern_match.checksum_pattern.to_string();
-                    let count = checksum_pattern_success_count.entry(pattern_str).or_insert(0);
+                    let count = checksum_pattern_success_count
+                        .entry(pattern_str)
+                        .or_insert(0);
                     *count += 1;
                 }
 
@@ -149,12 +176,13 @@ pub fn process_file(file_path: &PathBuf, block_size: usize, checksum_patterns: &
                 overlap.copy_from_slice(&block[read_size - overlap_length..read_size]);
 
                 // Update recent speeds
-                let this_block_speed_bytes_per_sec = read_size as f32 / start_time_this_block.elapsed().as_secs_f32();
-                recent_speeds.push_back((Instant::now(), this_block_speed_bytes_per_sec));  
+                let this_block_speed_bytes_per_sec =
+                    read_size as f32 / start_time_this_block.elapsed().as_secs_f32();
+                recent_speeds.push_back((Instant::now(), this_block_speed_bytes_per_sec));
             }
             Err(e) => {
                 error!("Error reading data: {:?}", e);
-                return Err(e)
+                return Err(e);
             }
         }
 
@@ -166,14 +194,17 @@ pub fn process_file(file_path: &PathBuf, block_size: usize, checksum_patterns: &
             let bytes_per_sec = total_bytes_read as f32 / time_elapsed;
 
             // Remove old entries that are outside the 60-second window, then compute the average speed
-            while recent_speeds.front().map_or(false, |&(time, _)| Instant::now().duration_since(time) > Duration::from_secs(60)) {
+            while recent_speeds.front().map_or(false, |&(time, _)| {
+                Instant::now().duration_since(time) > Duration::from_secs(60)
+            }) {
                 recent_speeds.pop_front();
             }
             let average_speed_bytes_per_sec = if recent_speeds.is_empty() {
                 warn!("No recent speeds to compute SMA. Using 0.0 KiB/sec. Seems like the process is stuck/halted.");
                 0.0
             } else {
-                recent_speeds.iter().map(|&(_, speed)| speed).sum::<f32>() / recent_speeds.len() as f32
+                recent_speeds.iter().map(|&(_, speed)| speed).sum::<f32>()
+                    / recent_speeds.len() as f32
             };
 
             info!("PROGRESS: {} bytes = {} MiB = {} GiB read @ {:.1}|{:.1} KiB/sec (all|60sec). Successes: {} = {:?}",
@@ -190,8 +221,10 @@ pub fn process_file(file_path: &PathBuf, block_size: usize, checksum_patterns: &
     }
 
     let duration = start_time.elapsed();
-    info!("Completed in {:?}, Total successes: {}", duration, total_success_count);
+    info!(
+        "Completed in {:?}, Total successes: {}",
+        duration, total_success_count
+    );
 
     Ok(())
 }
-

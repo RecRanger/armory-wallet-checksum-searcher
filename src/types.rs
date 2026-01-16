@@ -7,7 +7,6 @@ pub struct ChecksumPatternSpec {
     // TODO: could add hash function field here, if we wanted
 }
 
-
 impl ToString for ChecksumPatternSpec {
     fn to_string(&self) -> String {
         format!("{}+{}", self.chunk_len, self.checksum_len)
@@ -23,14 +22,19 @@ impl FromStr for ChecksumPatternSpec {
             return Err(format!("Invalid checksum pattern: {}", s));
         }
 
-        let chunk_len = parts[0].parse::<usize>().map_err(|e| format!("Invalid chunk length: {}", e))?;
-        let checksum_len = parts[1].parse::<usize>().map_err(|e| format!("Invalid checksum length: {}", e))?;
+        let chunk_len = parts[0]
+            .parse::<usize>()
+            .map_err(|e| format!("Invalid chunk length: {}", e))?;
+        let checksum_len = parts[1]
+            .parse::<usize>()
+            .map_err(|e| format!("Invalid checksum length: {}", e))?;
 
-        Ok(ChecksumPatternSpec { chunk_len, checksum_len })
+        Ok(ChecksumPatternSpec {
+            chunk_len,
+            checksum_len,
+        })
     }
 }
-
-
 
 pub struct ChecksumPatternMatch {
     pub checksum_pattern: ChecksumPatternSpec,

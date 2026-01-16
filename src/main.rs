@@ -11,9 +11,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use fern::Dispatch;
-use log::{info, error};
-
-
+use log::{error, info};
 
 fn setup_logger(log_file: &PathBuf) -> Result<(), fern::InitError> {
     Dispatch::new()
@@ -33,7 +31,6 @@ fn setup_logger(log_file: &PathBuf) -> Result<(), fern::InitError> {
     Ok(())
 }
 
-
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
 struct Args {
@@ -46,13 +43,13 @@ struct Args {
     output: PathBuf,
 
     /// Block size in KiB
-    #[clap(short, long="block-size", default_value = "8192")]
+    #[clap(short, long = "block-size", default_value = "8192")]
     block_size_kibibytes: usize,
 
     /// Checksum patterns to search for (chunk length + checksum length).
     /// Specify multiple, like: "-p 16+4 -p 20+4" etc.
     /// Default: "-p 16+4 -p 20+4 -p 32+4 -p 44+4 -p 65+4 -p 38+4".
-    #[clap(short, long="pattern", value_parser)]
+    #[clap(short, long = "pattern", value_parser)]
     patterns: Vec<ChecksumPatternSpec>,
 }
 
@@ -66,12 +63,12 @@ impl Args {
     }
 
     fn default_patterns() -> Vec<ChecksumPatternSpec> {
-        vec![
-            "16+4", "20+4", "32+4", "44+4", "65+4", "38+4"
-        ].iter().map(|&s| s.parse().unwrap()).collect()
+        vec!["16+4", "20+4", "32+4", "44+4", "65+4", "38+4"]
+            .iter()
+            .map(|&s| s.parse().unwrap())
+            .collect()
     }
 }
-
 
 fn main() -> io::Result<()> {
     let args = Args::parse_with_defaults();
@@ -99,9 +96,17 @@ fn main() -> io::Result<()> {
     //     ChecksumPatternSpec { chunk_len: 38, checksum_len: 4 }, // an arbitrary-length searcher to act as a "control"
     // ];
     let checksum_patterns = &args.patterns;
-    info!("Searching for {} checksum patterns: {:?}", checksum_patterns.len(), checksum_patterns);
-    
-    info!("Using block size: {} bytes = {} MiB", block_size_bytes, (block_size_bytes as f32 / 1024.0 / 1024.0));
+    info!(
+        "Searching for {} checksum patterns: {:?}",
+        checksum_patterns.len(),
+        checksum_patterns
+    );
+
+    info!(
+        "Using block size: {} bytes = {} MiB",
+        block_size_bytes,
+        (block_size_bytes as f32 / 1024.0 / 1024.0)
+    );
     process_file(&args.file, block_size_bytes, &checksum_patterns)?;
 
     Ok(())

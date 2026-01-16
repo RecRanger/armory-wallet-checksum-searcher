@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use indexmap::IndexMap;
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::{ProgressBar, ParallelProgressIterator as _, ProgressDrawTarget, ProgressStyle};
 use memmap2::Mmap;
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use log::info;
@@ -30,8 +31,6 @@ fn search_for_checksums(
     data: &[u8],
     checksum_patterns: &[ChecksumPatternSpec],
 ) -> Vec<ChecksumPatternMatch> {
-    let mut matches: Vec<ChecksumPatternMatch> = Vec::new();
-
     // Create progress bar.
     let progress_bar = ProgressBar::new(data.len() as u64);
     progress_bar.set_style(
@@ -45,49 +44,62 @@ fn search_for_checksums(
         progress_bar.set_draw_target(ProgressDrawTarget::hidden());
     }
 
-    for chunk_start_idx in 0..data.len() {
-        // Update progress bar every 2MB to avoid overhead.
-        if chunk_start_idx % 2_000_000 == 0 {
-            progress_bar.set_position(chunk_start_idx as u64);
-        }
+    // Iterate over every chunk starting point, with parallel workers for each starting point.
+    let mut matches: Vec<ChecksumPatternMatch> = (0..data.len())
+        .into_par_iter()
+        .progress_with(progress_bar.clone())
+        .flat_map(|chunk_start_idx| {
+            // This closure _could_ return multiple matches (as many tests assert).
+            // Create a local Vec to make it possible to return many matches.
+            let mut local_matches = Vec::new();
 
-        for pattern in checksum_patterns {
-            if chunk_start_idx + pattern.total_length() as usize > data.len() {
-                continue;
+            for pattern in checksum_patterns {
+                if chunk_start_idx + pattern.total_length() as usize > data.len() {
+                    continue;
+                }
+
+                let chunk_and_checksum =
+                    &data[chunk_start_idx..chunk_start_idx + pattern.total_length() as usize];
+
+                // Skip if chunk and checksum are all zeros.
+                if chunk_and_checksum.iter().all(|&x| x == 0) {
+                    continue;
+                }
+
+                let hash_result = compute_checksum(&chunk_and_checksum[..pattern.chunk_len]);
+
+                if hash_result[..pattern.checksum_len]
+                    == chunk_and_checksum[pattern.chunk_len..pattern.total_length()]
+                {
+                    info!(
+                        "✅ Match! Offset: {}=0x{:x}, Chunk Length: {}, Chunk: {:x?}, Hash: {:x?}",
+                        chunk_start_idx,
+                        chunk_start_idx,
+                        pattern.chunk_len,
+                        chunk_and_checksum[..pattern.chunk_len].to_vec(),
+                        hash_result
+                    );
+
+                    local_matches.push(ChecksumPatternMatch {
+                        chunk_len: pattern.chunk_len,
+                        checksum_len: pattern.checksum_len,
+                        chunk_start_offset: chunk_start_idx as u64,
+                    });
+                }
             }
 
-            let chunk_and_checksum =
-                &data[chunk_start_idx..chunk_start_idx + pattern.total_length() as usize];
-
-            // Skip if chunk and checksum are all zeros.
-            if chunk_and_checksum.iter().all(|&x| x == 0) {
-                continue;
-            }
-
-            let hash_result = compute_checksum(&chunk_and_checksum[..pattern.chunk_len]);
-
-            if hash_result[..pattern.checksum_len]
-                == chunk_and_checksum[pattern.chunk_len..pattern.total_length()]
-            {
-                info!(
-                    "✅ Match! Offset: {}=0x{:x}, Chunk Length: {}, Chunk: {:x?}, Hash: {:x?}",
-                    chunk_start_idx,
-                    chunk_start_idx,
-                    pattern.chunk_len,
-                    chunk_and_checksum[..pattern.chunk_len].to_vec(),
-                    hash_result
-                );
-
-                matches.push(ChecksumPatternMatch {
-                    chunk_len: pattern.chunk_len,
-                    checksum_len: pattern.checksum_len,
-                    chunk_start_offset: chunk_start_idx as u64,
-                });
-            }
-        }
-    }
+            local_matches
+        })
+        .collect();
 
     progress_bar.finish_with_message("Search complete");
+
+    info!("Search complete. Found {} matches.", matches.len());
+
+    // Ensure they're in sorted order after Rayon potentially re-ordered them.
+    matches.sort_by_key(|m| m.chunk_start_offset);
+
+    info!("Matches sorted by chunk_start_offset.");
 
     matches
 }
@@ -134,6 +146,8 @@ pub fn process_file(
 
     Ok(pattern_matches)
 }
+
+// MARK: Tests
 
 #[cfg(test)]
 mod tests {
@@ -452,7 +466,8 @@ mod tests {
     }
 }
 
-/// Additional advanced tests for search_for_checksums
+// MARK: Adv. Tests
+
 #[cfg(test)]
 mod advanced_tests {
     use super::*;

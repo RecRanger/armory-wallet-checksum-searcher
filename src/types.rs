@@ -38,6 +38,12 @@ impl FromStr for ChecksumPatternSpec {
     }
 }
 
+impl ChecksumPatternSpec {
+    pub fn total_length(&self) -> u16 {
+        self.chunk_len + self.checksum_len
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ChecksumPatternMatch {
     pub chunk_len: u16,

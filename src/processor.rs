@@ -47,19 +47,14 @@ fn search_for_checksums(
             progress_bar.set_position(chunk_start_idx as u64);
         }
 
-        for ChecksumPatternSpec {
-            chunk_len,
-            checksum_len,
-        } in checksum_patterns
-        {
-            let chunk_plus_checksum_len: usize = (*chunk_len + *checksum_len) as usize;
-            if chunk_start_idx + chunk_plus_checksum_len > data.len() {
+        for pattern in checksum_patterns {
+            if chunk_start_idx + pattern.total_length() as usize > data.len() {
                 continue;
             }
 
-            let chunk = &data[chunk_start_idx..chunk_start_idx + (*chunk_len as usize)];
-            let checksum = &data[chunk_start_idx + (*chunk_len as usize)
-                ..chunk_start_idx + chunk_plus_checksum_len];
+            let chunk = &data[chunk_start_idx..chunk_start_idx + (pattern.chunk_len as usize)];
+            let checksum = &data[chunk_start_idx + (pattern.chunk_len as usize)
+                ..chunk_start_idx + pattern.total_length() as usize];
 
             // Skip if chunk is all zeros.
             if chunk.iter().all(|&x| x == 0) {
@@ -76,12 +71,12 @@ fn search_for_checksums(
             if hash_result == checksum {
                 info!(
                     "✅ Match! Offset: {}=0x{:x}, Chunk Length: {}, Chunk: {:x?}, Hash: {:x?}",
-                    chunk_start_idx, chunk_start_idx, chunk_len, chunk, hash_result
+                    chunk_start_idx, chunk_start_idx, pattern.chunk_len, chunk, hash_result
                 );
 
                 matches.push(ChecksumPatternMatch {
-                    chunk_len: *chunk_len,
-                    checksum_len: *checksum_len,
+                    chunk_len: pattern.chunk_len,
+                    checksum_len: pattern.checksum_len,
                     chunk_start_offset: chunk_start_idx as u64,
                 });
             }

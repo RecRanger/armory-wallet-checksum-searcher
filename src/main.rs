@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use fern::Dispatch;
 use log::{error, info};
 
-fn setup_logger(log_file: &PathBuf) -> Result<(), fern::InitError> {
-    Dispatch::new()
+fn setup_logger(log_file: Option<PathBuf>) -> Result<(), fern::InitError> {
+    let mut dispatch = Dispatch::new()
         .format(|out, message, record| {
             out.finish(format_args!(
                 "[{} {} {}] {}",
@@ -26,9 +26,13 @@ fn setup_logger(log_file: &PathBuf) -> Result<(), fern::InitError> {
             ))
         })
         .level(log::LevelFilter::Debug)
-        .chain(std::io::stdout())
-        .chain(fern::log_file(log_file)?)
-        .apply()?;
+        .chain(std::io::stdout());
+
+    if let Some(log_file_path) = log_file {
+        dispatch = dispatch.chain(fern::log_file(log_file_path)?);
+    }
+
+    dispatch.apply()?;
     Ok(())
 }
 
@@ -49,21 +53,21 @@ struct Args {
 
     /// Checksum patterns to search for (chunk length + checksum length).
     /// Use `--help` to see full details.
-    /// 
+    ///
     /// Specify multiple, like: "-p 16+4 -p 20+4" etc.
-    /// 
+    ///
     /// Default: "-p 16+4 -p 20+4 -p 32+4 -p 44+4 -p 65+4 -p 38+4".
-    /// 
+    ///
     /// 16+4 -> Initialization Vector (IV)
-    /// 
+    ///
     /// 20+4 -> Public Key Hash160 (Address)
-    /// 
+    ///
     /// 32+4 -> ChainCode and PrivKey
-    /// 
+    ///
     /// 44+4 -> KdfParameters: function width of the KDF parameters block
-    /// 
+    ///
     /// 65+4 -> Public Key
-    /// 
+    ///
     /// 38+4 -> An arbitrary-length searcher to act as a "control"
     #[clap(short, long = "pattern", value_parser)]
     patterns: Vec<ChecksumPatternSpec>,
@@ -89,14 +93,12 @@ impl Args {
 fn main() -> io::Result<()> {
     let args = Args::parse_with_defaults();
 
-    // Register log file.
-    if let Some(ref log_file) = args.output_log_file {
-        match setup_logger(log_file) {
-            Ok(_) => info!("Logger setup successful!"),
-            Err(e) => {
-                error!("Error setting up logger: {:?}", e);
-                panic!("Error setting up logger: {:?}", e);
-            }
+    // Register log file and/or normal stdout logger.
+    match setup_logger(args.output_log_file) {
+        Ok(_) => info!("Logger setup successful!"),
+        Err(e) => {
+            error!("Error setting up logger: {:?}", e);
+            panic!("Error setting up logger: {:?}", e);
         }
     }
 

@@ -115,6 +115,10 @@ pub fn process_file(
     let file = File::open(file_path)?;
     let mmap = unsafe { Mmap::map(&file)? };
 
+    // Optimization: Inform the kernel that it's fine to dump old pages after we're past,
+    // and that we'll be requesting forward-looking pages continuously.
+    mmap.advise(memmap2::Advice::Sequential)?;
+
     info!(
         "Memory-mapped file: {} bytes ({:.3} GiB)",
         mmap.len(),

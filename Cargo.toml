@@ -1,7 +1,7 @@
 [package]
 name = "armory_wallet_checksum_searcher"
 description = "A tool to locate and extract Armory wallets on corrupted and deleted hard drives"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 
 readme = "README.md"

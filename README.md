@@ -17,6 +17,7 @@ A tool to locate and extract Armory wallets on corrupted and deleted hard drives
 * Armory wallets have a 32-byte private key, followed by a 4-byte sha256d hash of that key.
 * By taking every group of 36 bytes on the drive image, performing the checksum validation (a sha256d hash) on the first 32 bytes, and seeing if they match the final 4 bytes, we can find all parts that are "probably private keys".
 * After you find these keys, use a tool like `ku` to convert them to usable keys.
+* Refer to the Armory documentation outlining the checksum format: https://www.bitcoinarmory.com/wallet-format/
 
 ## Usage
 

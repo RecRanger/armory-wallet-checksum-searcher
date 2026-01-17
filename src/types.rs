@@ -50,6 +50,9 @@ pub struct ChecksumPatternMatch {
     pub checksum_len: usize,
 
     pub chunk_start_offset: u64,
+
+    pub chunk_data: Vec<u8>,
+    pub checksum_data: Vec<u8>,
 }
 
 impl ChecksumPatternMatch {

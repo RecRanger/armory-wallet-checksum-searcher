@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use indexmap::IndexMap;
-use indicatif::{ProgressBar, ParallelProgressIterator as _, ProgressDrawTarget, ProgressStyle};
+use indicatif::{ParallelProgressIterator as _, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use memmap2::Mmap;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -84,6 +84,10 @@ fn search_for_checksums(
                         chunk_len: pattern.chunk_len,
                         checksum_len: pattern.checksum_len,
                         chunk_start_offset: chunk_start_idx as u64,
+                        chunk_data: chunk_and_checksum[..pattern.chunk_len].to_vec(),
+                        checksum_data: chunk_and_checksum
+                            [pattern.chunk_len..pattern.total_length()]
+                            .to_vec(),
                     });
                 }
             }
@@ -672,6 +676,8 @@ mod advanced_tests {
                 chunk_len: chunk1.len(),
                 checksum_len: 4,
                 chunk_start_offset: offset_1 as u64,
+                chunk_data: chunk1.to_vec(),
+                checksum_data: vec![121, 164, 27, 175],
             }
         );
         assert_eq!(
@@ -680,6 +686,8 @@ mod advanced_tests {
                 chunk_len: chunk2.len(),
                 checksum_len: 4,
                 chunk_start_offset: offset_2 as u64,
+                chunk_data: chunk2.to_vec(),
+                checksum_data: vec![59, 20, 82, 250],
             }
         );
 
@@ -688,9 +696,11 @@ mod advanced_tests {
         assert_eq!(
             matches[2],
             ChecksumPatternMatch {
-                chunk_len: chunk1.len(),
+                chunk_len: chunk3.len(),
                 checksum_len: 4,
                 chunk_start_offset: offset_3 as u64,
+                chunk_data: chunk3.to_vec(),
+                checksum_data: vec![229, 9, 220, 119],
             }
         );
 
@@ -701,6 +711,8 @@ mod advanced_tests {
                 chunk_len: chunk3.len(),
                 checksum_len: 8,
                 chunk_start_offset: offset_3 as u64,
+                chunk_data: chunk3.to_vec(),
+                checksum_data: vec![229, 9, 220, 119, 17, 114, 177, 90], // Superstring of case above.
             }
         );
     }

@@ -173,6 +173,43 @@ mod tests {
     use super::*;
     use crate::types::ChecksumPatternSpec;
 
+    #[test]
+    fn test_sha256_is_valid() {
+        let input_1 = b"";
+        let expect_1: [u8; 32] = [
+            0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+            0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
+            0x78, 0x52, 0xb8, 0x55,
+        ];
+        assert_eq!(sha256(input_1), expect_1);
+
+        let input_2 = b"Hello world.\n";
+        let expect_2: [u8; 32] = [
+            // 6472bf692aaf270d5f9dc40c5ecab8f826ecc92425c8bac4d1ea69bcbbddaea4
+            0x64, 0x72, 0xbf, 0x69, 0x2a, 0xaf, 0x27, 0x0d, 0x5f, 0x9d, 0xc4, 0x0c, 0x5e, 0xca,
+            0xb8, 0xf8, 0x26, 0xec, 0xc9, 0x24, 0x25, 0xc8, 0xba, 0xc4, 0xd1, 0xea, 0x69, 0xbc,
+            0xbb, 0xdd, 0xae, 0xa4,
+        ];
+        assert_eq!(sha256(input_2), expect_2);
+    }
+
+    #[test]
+    fn test_sha256d_is_valid() {
+        let input_1 = b"";
+        let expect_1: [u8; 32] = [
+            93, 246, 224, 226, 118, 19, 89, 211, 10, 130, 117, 5, 142, 41, 159, 204, 3, 129, 83,
+            69, 69, 245, 92, 244, 62, 65, 152, 63, 93, 76, 148, 86,
+        ];
+        assert_eq!(sha256d(input_1), expect_1);
+
+        let input_2 = b"Hello world.\n";
+        let expect_2: [u8; 32] = [
+            184, 215, 246, 75, 181, 105, 139, 209, 5, 34, 213, 195, 67, 95, 62, 167, 203, 177, 223,
+            133, 225, 14, 113, 253, 51, 66, 99, 113, 155, 48, 140, 144,
+        ];
+        assert_eq!(sha256d(input_2), expect_2);
+    }
+
     /// Helper function to create test data with valid checksum
     fn create_valid_chunk(chunk: &[u8], checksum_len: usize) -> Vec<u8> {
         let hash = compute_checksum(chunk);

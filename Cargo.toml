@@ -1,7 +1,7 @@
 [package]
 name = "armory_wallet_checksum_searcher"
 description = "A tool to locate and extract Armory wallets on corrupted and deleted hard drives"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 
 readme = "README.md"
@@ -14,7 +14,7 @@ authors = ["RecRanger <recranger+cratesio@proton.me>"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["asm"] }
 log = "0.4.21"
 simple_logger = "1.16.0"
 clap = { version = "3.1.18", features = ["derive"] }

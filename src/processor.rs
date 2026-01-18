@@ -44,6 +44,12 @@ fn search_for_checksums(
         progress_bar.set_draw_target(ProgressDrawTarget::hidden());
     }
 
+    let max_checksum_pattern_total_length = checksum_patterns
+        .iter()
+        .map(|pattern| pattern.total_length() as usize)
+        .max()
+        .unwrap_or(0);
+
     // Iterate over every chunk starting point, with parallel workers for each starting point.
     let mut matches: Vec<ChecksumPatternMatch> = (0..data.len())
         .into_par_iter()
@@ -55,24 +61,27 @@ fn search_for_checksums(
             // penalty. The allocation cost is only paid on insertion.
             let mut local_matches = Vec::new();
 
+            // Skip if chunk and checksum are all zeros (check once for longest pattern only).
+            // First, safety check for right at the end of the dataset, avoid array overruns.
+            if chunk_start_idx + max_checksum_pattern_total_length < data.len()
+                && data[chunk_start_idx..(chunk_start_idx + max_checksum_pattern_total_length)]
+                    .iter()
+                    .all(|&x| x == 0)
+            {
+                return local_matches;
+            }
+
             for pattern in checksum_patterns {
                 if chunk_start_idx + pattern.total_length() as usize > data.len() {
                     continue;
                 }
 
                 let chunk_and_checksum =
-                    &data[chunk_start_idx..chunk_start_idx + pattern.total_length() as usize];
-
-                // Skip if chunk and checksum are all zeros.
-                if chunk_and_checksum.iter().all(|&x| x == 0) {
-                    continue;
-                }
+                    &data[chunk_start_idx..chunk_start_idx + pattern.total_length()];
 
                 let hash_result = compute_checksum(&chunk_and_checksum[..pattern.chunk_len]);
 
-                if hash_result[..pattern.checksum_len]
-                    == chunk_and_checksum[pattern.chunk_len..pattern.total_length()]
-                {
+                if hash_result[..pattern.checksum_len] == chunk_and_checksum[pattern.chunk_len..] {
                     info!(
                         "✅ Match! Offset: {}=0x{:x}, Chunk Length: {}, Chunk: {:x?}, Hash: {:x?}",
                         chunk_start_idx,

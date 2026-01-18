@@ -33,3 +33,10 @@ indicatif = { version = "0.18.3", features = ["rayon"] }
 
 # Parallel execution.
 rayon = "1.11.0"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1 # Performance optimization attempt.
+panic = "abort"
+strip = true
+lto = "fat" # Performance optimization attempt.

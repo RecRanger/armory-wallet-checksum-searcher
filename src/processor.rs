@@ -51,6 +51,8 @@ fn search_for_checksums(
         .flat_map(|chunk_start_idx| {
             // This closure _could_ return multiple matches (as many tests assert).
             // Create a local Vec to make it possible to return many matches.
+            // Performance: Constructing this empty Vec does not result in an allocation performance
+            // penalty. The allocation cost is only paid on insertion.
             let mut local_matches = Vec::new();
 
             for pattern in checksum_patterns {

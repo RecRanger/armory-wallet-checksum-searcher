@@ -13,6 +13,7 @@ use log::info;
 
 use crate::types::{ChecksumPatternMatch, ChecksumPatternSpec};
 
+#[allow(unused)] // Helpful in tests.
 fn sha256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -20,9 +21,18 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 }
 
 fn sha256d(data: &[u8]) -> [u8; 32] {
-    sha256(&sha256(data))
+    // Basic: sha256(&sha256(data))
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let result_1 = hasher.finalize();
+
+    // Second round.
+    let mut hasher = Sha256::new();
+    hasher.update(&result_1);
+    hasher.finalize().into()
 }
 
+#[inline]
 fn compute_checksum(data: &[u8]) -> [u8; 32] {
     sha256d(data)
 }

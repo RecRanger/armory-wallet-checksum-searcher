@@ -1,5 +1,6 @@
 // https://sotrh.github.io/learn-wgpu/compute/introduction/
 
+use enum_map::{Enum, EnumMap, enum_map};
 use log::debug;
 use once_cell::sync::OnceCell;
 use std::sync::{Arc, Mutex};
@@ -102,12 +103,59 @@ fn ensure_buffer_capacity(
     (buffer, required_capacity)
 }
 
+#[derive(Clone, Copy, Enum)]
+pub enum ComputePipelineVersion {
+    Sha256,
+    Sha256d,
+}
+
 struct GPU {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    compute_pipeline: wgpu::ComputePipeline,
+
+    compute_pipelines: EnumMap<ComputePipelineVersion, wgpu::ComputePipeline>,
+    bind_group_layout: wgpu::BindGroupLayout,
 
     buffers: Mutex<Option<GpuBuffers>>,
+}
+
+fn create_compute_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    pipeline_layout: &wgpu::PipelineLayout,
+
+    version: ComputePipelineVersion,
+) -> wgpu::ComputePipeline {
+    // Inject configuration values into sha256-gpu.
+    let pipeline_constants: &[(&str, f64)] = &[
+        (
+            &"CONFIG_WORKGROUP_SIZE",
+            device.limits().max_compute_workgroup_size_x as f64,
+        ),
+        (
+            &"CONFIG_ENABLE_SHA256D",
+            match version {
+                ComputePipelineVersion::Sha256 => 0.0f64,
+                ComputePipelineVersion::Sha256d => 1.0f64,
+            },
+        ),
+    ];
+
+    let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: match version {
+            ComputePipelineVersion::Sha256 => Some("SHA256 Compute Pipeline"),
+            ComputePipelineVersion::Sha256d => Some("SHA256d Compute Pipeline"),
+        },
+        layout: Some(pipeline_layout),
+        module: &shader,
+        entry_point: Some("sha256_or_sha256d"),
+        compilation_options: wgpu::PipelineCompilationOptions {
+            constants: pipeline_constants,
+            ..Default::default()
+        },
+        cache: Default::default(),
+    });
+    compute_pipeline
 }
 
 impl GPU {
@@ -129,30 +177,82 @@ impl GPU {
 
         let shader = device.create_shader_module(wgpu::include_wgsl!("sha256-gpu.wgsl"));
 
-        // Inject configuration values into sha256-gpu.
-        let pipeline_constants: &[(&str, f64)] = &[(
-            &"CONFIG_WORKGROUP_SIZE",
-            device.limits().max_compute_workgroup_size_x as f64,
-        )];
-
-        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("SHA256 Compute Pipeline"),
-            layout: None,
-            module: &shader,
-            entry_point: Some("sha256"),
-            compilation_options: wgpu::PipelineCompilationOptions {
-                constants: pipeline_constants,
-                ..Default::default()
-            },
-            cache: Default::default(),
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("SHA256 Bind Group Layout"),
+            entries: &[
+                // messages
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // num_messages
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // message_sizes
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // hashes
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("SHA256x Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            ..Default::default()
+        });
+
+        let compute_pipelines = enum_map! {
+            ComputePipelineVersion::Sha256 => create_compute_pipeline(
+                &device, &shader, &pipeline_layout, ComputePipelineVersion::Sha256
+            ),
+            ComputePipelineVersion::Sha256d => create_compute_pipeline(
+                &device, &shader, &pipeline_layout, ComputePipelineVersion::Sha256d
+            ),
+        };
 
         Ok(Self {
             device,
             queue,
-            compute_pipeline,
+            compute_pipelines,
+            bind_group_layout,
             buffers: Mutex::new(None),
         })
+    }
+
+    fn pipeline_for(&self, algo: ComputePipelineVersion) -> &wgpu::ComputePipeline {
+        &self.compute_pipelines[algo]
     }
 }
 
@@ -161,7 +261,10 @@ fn get_gpu() -> anyhow::Result<&'static GPU> {
     GPU_INSTANCE.get_or_try_init(|| pollster::block_on(GPU::init()))
 }
 
-pub async fn sha256_gpu<const N: usize>(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; N]>>
+pub async fn sha256_gpu<const N: usize>(
+    messages: &[&[u8]],
+    compute_pipeline_version: ComputePipelineVersion,
+) -> anyhow::Result<Vec<[u8; N]>>
 where
     [u8; N]: Sized,
 {
@@ -248,7 +351,7 @@ where
         });
 
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &gpu.compute_pipeline.get_bind_group_layout(0),
+            layout: &gpu.bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -333,7 +436,7 @@ where
         debug!("Recreating bind group due to buffer capacity change");
 
         buffers.bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &gpu.compute_pipeline.get_bind_group_layout(0),
+            layout: &gpu.bind_group_layout,
             entries: &[
                 // Note: We exclude the message_upload_buffer and the readback_buffer here.
                 // Those buffers are CPU-size only, and only accessed by copying.
@@ -432,7 +535,7 @@ where
 
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-        pass.set_pipeline(&gpu.compute_pipeline);
+        pass.set_pipeline(&gpu.pipeline_for(compute_pipeline_version));
         pass.set_bind_group(0, &buffers.bind_group, &[]);
         pass.dispatch_workgroups(num_workgroups, 1, 1);
     }
@@ -547,17 +650,12 @@ pub fn max_allowed_message_count_per_operation(
 
 #[allow(dead_code)]
 pub fn run_sha256_gpu<const N: usize>(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; N]>> {
-    pollster::block_on(sha256_gpu::<N>(messages))
+    pollster::block_on(sha256_gpu::<N>(messages, ComputePipelineVersion::Sha256))
 }
 
 #[allow(dead_code)]
-pub fn run_sha256d_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
-    let hash_out_1: Vec<[u8; 32]> = pollster::block_on(sha256_gpu(messages))?;
-
-    let hash_out_2: Vec<[u8; 32]> = pollster::block_on(sha256_gpu(
-        &hash_out_1.iter().map(|h| &h[..]).collect::<Vec<&[u8]>>(),
-    ))?;
-    Ok(hash_out_2)
+pub fn run_sha256d_gpu<const N: usize>(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; N]>> {
+    pollster::block_on(sha256_gpu::<N>(messages, ComputePipelineVersion::Sha256d))
 }
 
 // MARK: Tests
@@ -734,6 +832,37 @@ mod tests {
         let hashes_again = run_sha256d_gpu(&[&input[..], &input[..]]).unwrap();
         assert_eq!(hashes_again.len(), 2);
         assert_eq!(hashes_again, vec![expected, expected]);
+    }
+
+    #[test]
+    fn test_switching_pipeline_versions() {
+        let input = b"Hello world.\n";
+        let expected_sha256d: [u8; 32] = [
+            184, 215, 246, 75, 181, 105, 139, 209, 5, 34, 213, 195, 67, 95, 62, 167, 203, 177, 223,
+            133, 225, 14, 113, 253, 51, 66, 99, 113, 155, 48, 140, 144,
+        ];
+        let expected_sha256: [u8; 32] = [
+            // 6472bf692aaf270d5f9dc40c5ecab8f826ecc92425c8bac4d1ea69bcbbddaea4
+            0x64, 0x72, 0xbf, 0x69, 0x2a, 0xaf, 0x27, 0x0d, 0x5f, 0x9d, 0xc4, 0x0c, 0x5e, 0xca,
+            0xb8, 0xf8, 0x26, 0xec, 0xc9, 0x24, 0x25, 0xc8, 0xba, 0xc4, 0xd1, 0xea, 0x69, 0xbc,
+            0xbb, 0xdd, 0xae, 0xa4,
+        ];
+
+        let hashes_sha256d = run_sha256d_gpu(&[&input[..], &input[..]]).unwrap();
+        assert_eq!(hashes_sha256d.len(), 2);
+        assert_eq!(hashes_sha256d, vec![expected_sha256d, expected_sha256d]);
+
+        let hashes_sha256 = run_sha256_gpu(&[&input[..], &input[..]]).unwrap();
+        assert_eq!(hashes_sha256.len(), 2);
+        assert_eq!(hashes_sha256, vec![expected_sha256, expected_sha256]);
+
+        let hashes_sha256d = run_sha256d_gpu(&[&input[..], &input[..]]).unwrap();
+        assert_eq!(hashes_sha256d.len(), 2);
+        assert_eq!(hashes_sha256d, vec![expected_sha256d, expected_sha256d]);
+
+        let hashes_sha256 = run_sha256_gpu(&[&input[..], &input[..]]).unwrap();
+        assert_eq!(hashes_sha256.len(), 2);
+        assert_eq!(hashes_sha256, vec![expected_sha256, expected_sha256]);
     }
 
     #[test]

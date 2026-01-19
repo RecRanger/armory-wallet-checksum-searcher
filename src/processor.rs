@@ -54,9 +54,9 @@ fn search_for_checksums(
         progress_bar.set_draw_target(ProgressDrawTarget::hidden());
     }
 
-    let max_checksum_pattern_total_length = checksum_patterns
+    let max_checksum_pattern_total_length: usize = checksum_patterns
         .iter()
-        .map(|pattern| pattern.total_length() as usize)
+        .map(|pattern| pattern.total_length())
         .max()
         .unwrap_or(0);
 
@@ -82,7 +82,7 @@ fn search_for_checksums(
             }
 
             for pattern in checksum_patterns {
-                if chunk_start_idx + pattern.total_length() as usize > data.len() {
+                if chunk_start_idx + pattern.total_length() > data.len() {
                     continue;
                 }
 

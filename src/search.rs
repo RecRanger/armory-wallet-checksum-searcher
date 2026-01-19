@@ -101,6 +101,7 @@ mod tests {
     use rstest::rstest;
 
     use crate::search_with_cpu::compute_checksum;
+    use crate::test_general::get_test_config;
     use crate::types::ChecksumPatternSpec;
 
     use rand::rngs::StdRng;
@@ -494,6 +495,10 @@ mod tests {
     #[case(ProcessorChoice::Cpu)]
     #[case(ProcessorChoice::Gpu)]
     fn test_with_large_random_data_1(#[case] processor: ProcessorChoice) {
+        if !get_test_config().enable_slow_tests {
+            return;
+        }
+
         // Test case found by trial-and-error with find_random_seeds_with_matches()
         let test_data = generate_random_array(1024 * 1024 * 128, 16);
 
@@ -541,6 +546,7 @@ mod advanced_tests {
     use rstest::rstest;
 
     use crate::search_with_cpu::compute_checksum;
+    use crate::test_general::get_test_config;
     use crate::types::{ChecksumPatternMatch, ChecksumPatternSpec};
 
     fn create_valid_chunk(chunk: &[u8], checksum_len: usize) -> Vec<u8> {
@@ -580,7 +586,7 @@ mod advanced_tests {
     #[case(ProcessorChoice::Gpu)]
     fn test_performance_no_matches_large_data(#[case] processor: ProcessorChoice) {
         // Test with 1MB of random-ish data (no valid checksums).
-        let test_data: Vec<u8> = (0..1_000_000u64)
+        let test_data: Vec<u8> = (0..get_test_config().max_data_size_mebibytes)
             .map(|i| ((i * 1103515245 + 12345) % 256) as u8)
             .collect();
 

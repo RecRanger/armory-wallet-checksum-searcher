@@ -4,6 +4,9 @@ mod search_with_gpu;
 mod sha256_gpu;
 mod types;
 
+#[cfg(test)]
+mod test_general;
+
 use types::ChecksumPatternSpec;
 
 use std::fs::File;

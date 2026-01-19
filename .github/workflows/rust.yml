@@ -14,7 +14,7 @@ env:
   # WGPU_POWER_PREF: low
 
 jobs:
-  build:
+  build-debug:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -61,12 +61,17 @@ jobs:
         run: cargo build
 
       - name: Run tests (wgpu compute, --release)
+        env:
+          TEST_ENABLE_SLOW_TESTS: true
+          TEST_MAX_DATA_SIZE_MIB: 256
         run: cargo test --verbose --release
 
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: build
+    needs:
+      - build-release
+      - build-debug
     if: github.event_name == 'release'
     permissions:
       id-token: write     # Required for OIDC token exchange.

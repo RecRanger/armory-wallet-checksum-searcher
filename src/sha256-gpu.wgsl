@@ -37,12 +37,15 @@ fn ch(e: u32, f: u32, g: u32) -> u32 {
     return (e & f) ^ ((~e) & g);
 }
 
+// Inject `device.limits().max_compute_workgroup_size_x` value from Rust.
+override CONFIG_WORKGROUP_SIZE: u32 = 256u;
+
 @group(0) @binding(0) var<storage, read_write> messages: array<u32>;
 @group(0) @binding(1) var<storage, read> num_messages: u32;
 @group(0) @binding(2) var<storage, read> message_sizes: array<u32>;
 @group(0) @binding(3) var<storage, read_write> hashes: array<u32>;
 
-@compute @workgroup_size(256) // TODO: In the source, this value is injected from the JS host.
+@compute @workgroup_size(CONFIG_WORKGROUP_SIZE)
 fn sha256(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let index = global_id.x;

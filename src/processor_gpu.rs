@@ -1,14 +1,8 @@
 // https://sotrh.github.io/learn-wgpu/compute/introduction/
 
-// use once_cell::sync::OnceCell;
+use once_cell::sync::OnceCell;
 use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt as _;
-
-// fn pad_message(bytes: &[u8], size: u32) -> Vec<u32> {
-//     let mut buf = vec![0u8; (size * 4) as usize];
-//     buf[..bytes.len()].copy_from_slice(bytes);
-//     bytemuck::cast_vec(buf)
-// }
 
 fn pad_message(bytes: &[u8], size_words: u32) -> Vec<u32> {
     let mut out = vec![0u32; size_words as usize];
@@ -29,11 +23,11 @@ fn get_message_sizes(bytes: &[u8]) -> [u32; 2] {
     [len_bit / 32, len_bit_padded / 32]
 }
 
-fn calc_num_workgroups(device: &wgpu::Device, messages_len: usize) -> u32 {
+fn calc_num_workgroups(device: &wgpu::Device, num_messages: usize) -> u32 {
     let max_wg = device.limits().max_compute_workgroup_size_x;
     let max_groups = device.limits().max_compute_workgroups_per_dimension;
 
-    let num = ((messages_len as u32) + max_wg - 1) / max_wg;
+    let num = ((num_messages as u32) + max_wg - 1) / max_wg;
     if num > max_groups {
         panic!("Input array too large. Max size is {}", max_groups * max_wg);
     }
@@ -77,19 +71,21 @@ impl GPU {
 
         let shader = device.create_shader_module(wgpu::include_wgsl!("sha256-gpu.wgsl"));
 
-        // let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        //     label: None,
-        //     layout: None,
-        //     module: &shader_module,
-        //     entry_point: "sha256",
-        // });
+        // Inject configuration values into sha256-gpu.
+        let pipeline_constants: &[(&str, f64)] = &[(
+            &"CONFIG_WORKGROUP_SIZE",
+            device.limits().max_compute_workgroup_size_x as f64,
+        )];
 
         let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("SHA256 Compute Pipeline"),
             layout: None,
             module: &shader,
             entry_point: Some("sha256"),
-            compilation_options: Default::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: pipeline_constants,
+                ..Default::default()
+            },
             cache: Default::default(),
         });
 
@@ -101,23 +97,15 @@ impl GPU {
     }
 }
 
-// static GPU_INSTANCE: OnceCell<GPU> = OnceCell::new();
-
-// async fn get_gpu() -> Result<&'static GPU, GpuError> {
-//     GPU_INSTANCE
-//         .get_or_try_init(|| async { GPU::init().await })
-//         .await
-// }
+static GPU_INSTANCE: OnceCell<GPU> = OnceCell::new();
+fn get_gpu() -> anyhow::Result<&'static GPU> {
+    GPU_INSTANCE.get_or_try_init(|| pollster::block_on(GPU::init()))
+}
 
 pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     validate_messages(&messages);
 
-    // TODO: cache across runs.
-    // static mut GPU_INSTANCE: Mutex<Option<GPU>> = Mutex::new(None);
-    // static GPU_INSTANCE: OnceCell<GPU> = OnceCell::new();
-    // let gpu = GPU_INSTANCE.get_or_try_init(|| GPU::init().await).await?;
-
-    let gpu = GPU::init().await?;
+    let gpu = get_gpu()?;
 
     let num_messages = messages.len();
     let num_workgroups = calc_num_workgroups(&gpu.device, num_messages);
@@ -234,8 +222,8 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
 
     let mapped = buffer_slice.get_mapped_range();
 
-    // ---- reshape into Vec<[u8; 32]> ----
-    let mut hashes = Vec::with_capacity(num_messages);
+    // Reshape from long output array into separate hash values for each message.
+    let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(num_messages);
     for i in 0..num_messages {
         let start = i * 32;
         let end = start + 32;
@@ -248,6 +236,16 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     readback.unmap();
 
     Ok(hashes)
+}
+
+/// Fetch the maximum allowable number of messages that can be passsed to `run_sha256_gpu()`.
+pub fn max_allowed_message_count_per_operation() -> anyhow::Result<usize> {
+    let device = &get_gpu()?.device;
+
+    // Based on logic/docs in `calc_num_workgroups()`.
+    let max_wg = device.limits().max_compute_workgroup_size_x;
+    let max_groups = device.limits().max_compute_workgroups_per_dimension;
+    Ok((max_groups * max_wg) as usize)
 }
 
 pub fn run_sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
@@ -282,5 +280,10 @@ mod tests {
         let hashes_again = run_sha256_gpu(&[&input_1[..], &input_2[..]]).unwrap();
         assert_eq!(hashes_again.len(), 2);
         assert_eq!(hashes_again, vec![expect_1, expect_2]);
+    }
+
+    #[test]
+    fn test_max_allowed_message_count_per_operation() {
+        assert!(max_allowed_message_count_per_operation().unwrap() >= 256);
     }
 }

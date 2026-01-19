@@ -98,6 +98,8 @@ mod tests {
     use std::str::FromStr as _;
 
     use super::*;
+    use rstest::rstest;
+
     use crate::search_with_cpu::compute_checksum;
     use crate::types::ChecksumPatternSpec;
 
@@ -112,8 +114,10 @@ mod tests {
         result
     }
 
-    #[test]
-    fn test_single_match_at_offset_zero() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_single_match_at_offset_zero(#[case] processor: ProcessorChoice) {
         // Test Case 1: Single valid match at the beginning of data
         let chunk = b"Hello, World!";
         let checksum_len = 4;
@@ -124,7 +128,7 @@ mod tests {
             checksum_len,
         }];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(matches.len(), 1, "Should find exactly one match");
         assert_eq!(matches[0].chunk_start_offset, 0);
@@ -132,8 +136,10 @@ mod tests {
         assert_eq!(matches[0].checksum_len, checksum_len);
     }
 
-    #[test]
-    fn test_match_with_offset() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_match_with_offset(#[case] processor: ProcessorChoice) {
         // Test Case 2: Valid match with data before it
         let prefix = b"PADDING_DATA_";
         let chunk = b"Test chunk";
@@ -147,7 +153,7 @@ mod tests {
             checksum_len,
         }];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(matches.len(), 1, "Should find exactly one match");
         assert_eq!(
@@ -157,8 +163,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_multiple_matches_different_patterns() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_multiple_matches_different_patterns(#[case] processor: ProcessorChoice) {
         // Test Case 3: Multiple matches with different pattern specs
         let chunk1 = b"First";
         let checksum_len1 = 4;
@@ -181,15 +189,17 @@ mod tests {
             },
         ];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(matches.len(), 2, "Should find two matches");
         assert_eq!(matches[0].chunk_start_offset, 0);
         assert_eq!(matches[1].chunk_start_offset, offset2 as u64);
     }
 
-    #[test]
-    fn test_all_zeros_skipped() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_all_zeros_skipped(#[case] processor: ProcessorChoice) {
         // Test Case 4: All-zero data should be skipped
         let chunk_len = 10;
         let checksum_len = 4;
@@ -200,13 +210,15 @@ mod tests {
             checksum_len,
         }];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(matches.len(), 0, "All-zero patterns should be skipped");
     }
 
-    #[test]
-    fn test_invalid_checksum_no_match() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_invalid_checksum_no_match(#[case] processor: ProcessorChoice) {
         // Test Case 5: Invalid checksum should not match
         let chunk = b"Data with wrong checksum";
         let wrong_checksum = vec![0xFF, 0xFF, 0xFF, 0xFF];
@@ -219,7 +231,7 @@ mod tests {
             checksum_len: wrong_checksum.len(),
         }];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(
             matches.len(),
@@ -228,8 +240,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_insufficient_data_length() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_insufficient_data_length(#[case] processor: ProcessorChoice) {
         // Test Case 6: Pattern longer than available data
         let chunk = b"Short";
         let checksum_len = 4;
@@ -241,7 +255,7 @@ mod tests {
             checksum_len: 4,
         }];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(
             matches.len(),
@@ -250,8 +264,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_pattern_at_exact_end() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_pattern_at_exact_end(#[case] processor: ProcessorChoice) {
         // Test Case 7: Valid pattern ending exactly at data boundary
         let chunk = b"Edge";
         let checksum_len = 3;
@@ -262,14 +278,16 @@ mod tests {
             checksum_len,
         }];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(matches.len(), 1, "Should find match at exact boundary");
         assert_eq!(matches[0].chunk_start_offset, 0);
     }
 
-    #[test]
-    fn test_minimum_size_chunk() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_minimum_size_chunk(#[case] processor: ProcessorChoice) {
         // Test Case 8: Minimum size chunk (1 byte)
         let chunk = b"X";
         let checksum_len = 2;
@@ -280,14 +298,16 @@ mod tests {
             checksum_len,
         }];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(matches.len(), 1, "Should handle 1-byte chunks");
         assert_eq!(matches[0].chunk_len, 1);
     }
 
-    #[test]
-    fn test_multiple_patterns_same_offset() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_multiple_patterns_same_offset(#[case] processor: ProcessorChoice) {
         // Test Case 10: Multiple pattern specs that could match at same location
         let chunk = b"Test data here";
 
@@ -304,7 +324,7 @@ mod tests {
             },
         ];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         // Both patterns should match at offset 0
         assert_eq!(matches.len(), 2, "Should find matches for both patterns");
@@ -316,8 +336,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_consecutive_valid_chunks() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_consecutive_valid_chunks(#[case] processor: ProcessorChoice) {
         // Test Case 11: Back-to-back valid chunks
         let chunk1 = b"First";
         let chunk2 = b"Second";
@@ -338,15 +360,17 @@ mod tests {
             },
         ];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(matches.len(), 2, "Should find both consecutive chunks");
         assert_eq!(matches[0].chunk_start_offset, 0);
         assert_eq!(matches[1].chunk_start_offset, offset2 as u64);
     }
 
-    #[test]
-    fn test_empty_data() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_empty_data(#[case] processor: ProcessorChoice) {
         // Test Case 12: Empty data
         let test_data: Vec<u8> = vec![];
         let patterns = vec![ChecksumPatternSpec {
@@ -354,19 +378,21 @@ mod tests {
             checksum_len: 4,
         }];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(matches.len(), 0, "Empty data should produce no matches");
     }
 
-    #[test]
-    fn test_empty_patterns() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_empty_patterns(#[case] processor: ProcessorChoice) {
         // Test Case 13: Empty pattern list
         let chunk = b"Some data";
         let test_data = create_valid_chunk(chunk, 4);
         let patterns: Vec<ChecksumPatternSpec> = vec![];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(
             matches.len(),
@@ -375,8 +401,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_large_checksum_length() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_large_checksum_length(#[case] processor: ProcessorChoice) {
         // Test Case 14: Full 32-byte checksum
         let chunk = b"Full checksum";
         let checksum_len = 32; // Full SHA256d output
@@ -387,14 +415,16 @@ mod tests {
             checksum_len,
         }];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(matches.len(), 1, "Should handle full 32-byte checksum");
         assert_eq!(matches[0].checksum_len, 32);
     }
 
-    #[test]
-    fn test_partial_match_at_end() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_partial_match_at_end(#[case] processor: ProcessorChoice) {
         // Test Case 15: Incomplete pattern at end of data (should not match)
         let chunk = b"Complete";
         let checksum_len = 4;
@@ -408,7 +438,7 @@ mod tests {
             checksum_len,
         }];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         // Should only find the complete pattern, not the partial one
         assert_eq!(matches.len(), 1, "Should not match incomplete patterns");
@@ -460,8 +490,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_with_large_random_data_1() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_with_large_random_data_1(#[case] processor: ProcessorChoice) {
         // Test case found by trial-and-error with find_random_seeds_with_matches()
         let test_data = generate_random_array(1024 * 1024 * 128, 16);
 
@@ -471,7 +503,7 @@ mod tests {
             ChecksumPatternSpec::from_str("32+4").unwrap(),
         ];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(matches.len(), 2);
         assert_eq!(
@@ -506,6 +538,8 @@ mod tests {
 #[cfg(test)]
 mod advanced_tests {
     use super::*;
+    use rstest::rstest;
+
     use crate::search_with_cpu::compute_checksum;
     use crate::types::{ChecksumPatternMatch, ChecksumPatternSpec};
 
@@ -516,8 +550,10 @@ mod advanced_tests {
         result
     }
 
-    #[test]
-    fn test_real_world_bitcoin_style_data() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_real_world_bitcoin_style_data(#[case] processor: ProcessorChoice) {
         // Simulate Bitcoin-style transaction with checksum
         let version: u32 = 1;
         let mut tx_data = version.to_le_bytes().to_vec();
@@ -532,15 +568,17 @@ mod advanced_tests {
             checksum_len,
         }];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].chunk_start_offset, 0);
         assert_eq!(matches[0].checksum_len, 4);
     }
 
-    #[test]
-    fn test_performance_no_matches_large_data() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_performance_no_matches_large_data(#[case] processor: ProcessorChoice) {
         // Test with 1MB of random-ish data (no valid checksums).
         let test_data: Vec<u8> = (0..1_000_000u64)
             .map(|i| ((i * 1103515245 + 12345) % 256) as u8)
@@ -557,14 +595,16 @@ mod advanced_tests {
             },
         ];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         // Very unlikely to have any matches in random data.
         assert!(matches.len() == 0);
     }
 
-    #[test]
-    fn test_multiple_checksums_different_lengths() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_multiple_checksums_different_lengths(#[case] processor: ProcessorChoice) {
         // Test finding patterns with varying checksum lengths
         // Note: When a longer checksum is present, shorter checksum patterns will also match
         // because they check a prefix of the same hash
@@ -603,7 +643,7 @@ mod advanced_tests {
             },
         ];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         // Expected matches:
         // - offset_2: 2-byte pattern (1 match)
@@ -655,8 +695,10 @@ mod advanced_tests {
         assert!(matches_at_offset_8.iter().any(|m| m.checksum_len == 8));
     }
 
-    #[test]
-    fn test_non_overlapping_checksum_patterns() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_non_overlapping_checksum_patterns(#[case] processor: ProcessorChoice) {
         // Alternative test: use different chunk data to avoid overlapping matches.
         let chunk1 = b"First chunk";
         let chunk2 = b"Second chunk";
@@ -690,7 +732,7 @@ mod advanced_tests {
             },
         ];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         // Should find exactly 4 matches, one for each pattern, plus the time chunk3 + 8 bytes is found
         // with the 4-byte checksum.
@@ -749,8 +791,10 @@ mod advanced_tests {
         );
     }
 
-    #[test]
-    fn test_checksum_collision_detection() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_checksum_collision_detection(#[case] processor: ProcessorChoice) {
         // Test that only exact checksum matches are found
         let chunk = b"Original data";
         let checksum_len = 4;
@@ -773,7 +817,7 @@ mod advanced_tests {
             checksum_len,
         }];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(
             matches.len(),
@@ -783,8 +827,10 @@ mod advanced_tests {
         assert_eq!(matches[0].chunk_start_offset, 0);
     }
 
-    #[test]
-    fn test_nested_valid_patterns() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_nested_valid_patterns(#[case] processor: ProcessorChoice) {
         // Create a pattern where one valid chunk+checksum contains another
         let inner_chunk = b"Inner";
         let inner_checksum_len = 4;
@@ -809,7 +855,7 @@ mod advanced_tests {
             },
         ];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         // Should find both the inner and outer patterns
         assert!(matches.len() >= 2, "Should find nested patterns");
@@ -826,8 +872,10 @@ mod advanced_tests {
         assert!(has_outer, "Should find outer pattern");
     }
 
-    #[test]
-    fn test_boundary_offset_calculation() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_boundary_offset_calculation(#[case] processor: ProcessorChoice) {
         // Verify offset calculations are correct at various positions
         let chunk = b"PATTERN";
         let checksum_len = 4;
@@ -846,7 +894,7 @@ mod advanced_tests {
                 checksum_len,
             }];
 
-            let matches = search_for_checksums_cpu(&test_data, &patterns);
+            let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
             assert!(
                 matches.len() >= 1,
@@ -866,8 +914,10 @@ mod advanced_tests {
         }
     }
 
-    #[test]
-    fn test_single_byte_variations() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_single_byte_variations(#[case] processor: ProcessorChoice) {
         // Test that changing a single byte in chunk breaks the match
         let chunk = b"Test data for verification";
         let checksum_len = 8;
@@ -879,7 +929,7 @@ mod advanced_tests {
         }];
 
         // Original should match
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
         assert_eq!(matches.len(), 1);
 
         // Modify one byte in chunk - should not match
@@ -899,8 +949,10 @@ mod advanced_tests {
         );
     }
 
-    #[test]
-    fn test_all_zeros_with_valid_checksum_nearby() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_all_zeros_with_valid_checksum_nearby(#[case] processor: ProcessorChoice) {
         // Ensure all-zeros are skipped even when valid patterns exist nearby
         let zeros = vec![0u8; 20];
         let chunk = b"Valid";
@@ -920,15 +972,17 @@ mod advanced_tests {
             },
         ];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         // Should only find the valid chunk, not the zeros
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].chunk_start_offset, zeros.len() as u64);
     }
 
-    #[test]
-    fn test_maximum_checksum_length() {
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_maximum_checksum_length(#[case] processor: ProcessorChoice) {
         // Test with maximum possible checksum (full SHA256d output)
         let chunk = b"Max checksum test";
         let checksum_len = 32;
@@ -939,7 +993,7 @@ mod advanced_tests {
             checksum_len,
         }];
 
-        let matches = search_for_checksums_cpu(&test_data, &patterns);
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].checksum_len, 32);

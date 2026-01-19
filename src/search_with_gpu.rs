@@ -3,7 +3,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use log::info;
 
 use crate::search_with_cpu::sha256d;
-use crate::sha256_gpu::{max_allowed_message_count_per_operation, run_sha256_gpu};
+use crate::sha256_gpu::{max_allowed_message_count_per_operation, run_sha256d_gpu};
 use crate::types::{ChecksumPatternMatch, ChecksumPatternSpec};
 
 pub fn search_for_checksums_gpu(
@@ -60,18 +60,9 @@ pub fn search_for_checksums_gpu(
             }
 
             // Send the buffer for hashing.
-            let hash_results: Vec<[u8; 32]> = run_sha256_gpu(&message_selection)?;
+            let hash_results: Vec<[u8; 32]> = run_sha256d_gpu(&message_selection)?;
 
             debug_assert_eq!(hash_results.len(), message_selection.len());
-
-            // TODO: Move the double-hash step into the shader to avoid martialling through RAM.
-
-            let hash_results: Vec<[u8; 32]> = run_sha256_gpu(
-                &hash_results
-                    .iter()
-                    .map(|h| h.as_ref())
-                    .collect::<Vec<&[u8]>>(),
-            )?;
 
             // CPU-based override for this logic style.
             // let hash_results: Vec<[u8; 32]> =

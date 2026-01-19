@@ -117,6 +117,8 @@ struct GPU {
     bind_group_layout: wgpu::BindGroupLayout,
 
     buffers: Mutex<Option<GpuBuffers>>,
+
+    scratch_upload_buffer: Mutex<Vec<u32>>,
 }
 
 fn create_compute_pipeline(
@@ -248,6 +250,7 @@ impl GPU {
             compute_pipelines,
             bind_group_layout,
             buffers: Mutex::new(None),
+            scratch_upload_buffer: Mutex::new(Vec::new()),
         })
     }
 
@@ -279,8 +282,16 @@ where
     let padded_message_length_bytes = calc_padded_message_length_bytes(message_length);
     let padded_message_length_words: usize = (padded_message_length_bytes as usize) / 4;
 
-    // Pack messages.
-    let mut message_array = vec![0u32; messages.len() * padded_message_length_words];
+    // Pack messages into an allocated once-per-message size array.
+    let target_message_array_total_length_words = messages.len() * padded_message_length_words;
+    let mut scratch_upload_buffer_guard: std::sync::MutexGuard<'_, Vec<u32>> =
+        match gpu.scratch_upload_buffer.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+    if scratch_upload_buffer_guard.len() != target_message_array_total_length_words {
+        scratch_upload_buffer_guard.resize(target_message_array_total_length_words, 0);
+    }
     for (message_index, message_bytes) in messages.iter().enumerate() {
         // Validate that all messages are the same length! Critical requirement.
         if message_bytes.len() != message_length as usize {
@@ -295,11 +306,11 @@ where
         // Pad. Only pass in the slice to write to.
         let start = message_index * padded_message_length_words;
         let end = start + padded_message_length_words;
-        pad_message_into(message_bytes, &mut message_array[start..end]);
+        pad_message_into(message_bytes, &mut scratch_upload_buffer_guard[start..end]);
     }
 
-    // let mut buffers_guard = gpu.buffers.lock().unwrap();
-    let mut buffers_guard = match gpu.buffers.lock() {
+    // let mut gpu_buffers_guard = gpu.buffers.lock().unwrap();
+    let mut gpu_buffers_guard = match gpu.buffers.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
@@ -307,7 +318,7 @@ where
     let padded_messages_total_bytes = (messages.len() * padded_message_length_words * 4) as u64;
     let result_size_bytes = (32 * messages.len()) as u64;
 
-    let buffers = buffers_guard.get_or_insert_with(|| {
+    let buffers = gpu_buffers_guard.get_or_insert_with(|| {
         let message_upload_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("message_upload"),
             size: padded_messages_total_bytes,
@@ -501,8 +512,8 @@ where
 
         let dst_u32: &mut [u32] = bytemuck::cast_slice_mut(&mut mapped_range[..]);
 
-        dst_u32[..message_array.len()].copy_from_slice(&message_array);
-        // Note: Do not unmap here, intentionally.
+        dst_u32[..target_message_array_total_length_words]
+            .copy_from_slice(&scratch_upload_buffer_guard);
     }
     buffers.message_upload_buffer.unmap();
 

@@ -1,8 +1,8 @@
 // https://sotrh.github.io/learn-wgpu/compute/introduction/
 
+use log::debug;
 use once_cell::sync::OnceCell;
 use std::sync::{Arc, Mutex};
-use wgpu::util::DeviceExt as _;
 
 /// Calculate the length of the padded message.
 ///
@@ -27,17 +27,8 @@ const fn calc_padded_message_length_bytes(len_bytes: u32) -> u32 {
 ///
 /// Writes the padded message into `output_words`.
 /// The `output_words` slice should be `padded_len_bytes / 4` elements long.
-fn pad_message_into(message_bytes: &[u8], padded_len_bytes: u32, output_words: &mut [u32]) {
-    debug_assert!(padded_len_bytes % 4 == 0);
-    debug_assert_eq!(padded_len_bytes % 64, 0);
-    debug_assert_eq!(
-        padded_len_bytes,
-        calc_padded_message_length_bytes(message_bytes.len() as u32)
-    );
-
-    let padded_len_words: usize = (padded_len_bytes / 4) as usize;
-    debug_assert_eq!(output_words.len(), padded_len_words);
-
+/// Supports non-zero-filled data.
+fn pad_message_into(message_bytes: &[u8], output_words: &mut [u32]) {
     let output_bytes = bytemuck::cast_slice_mut::<u32, u8>(output_words);
 
     // Copy message.
@@ -75,10 +66,52 @@ fn validate_messages(messages: &[&[u8]]) {
     }
 }
 
+struct GpuBuffers {
+    message_buffer: wgpu::Buffer,
+    message_buffer_capacity_bytes: u64,
+
+    result_buffer: wgpu::Buffer,
+    result_buffer_capacity_bytes: u64,
+
+    readback_buffer: wgpu::Buffer,
+    readback_buffer_capacity_bytes: u64,
+
+    num_messages_buffer: wgpu::Buffer,
+    message_sizes_buffer: wgpu::Buffer,
+
+    bind_group: wgpu::BindGroup,
+}
+
+fn ensure_buffer_capacity(
+    device: &wgpu::Device,
+    existing: Option<wgpu::Buffer>,
+    existing_capacity: u64,
+    required_capacity: u64,
+    usage: wgpu::BufferUsages,
+    label: &str,
+) -> (wgpu::Buffer, u64) {
+    if let Some(buffer) = existing {
+        if existing_capacity >= required_capacity {
+            return (buffer, existing_capacity);
+        }
+    }
+
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: required_capacity,
+        usage,
+        mapped_at_creation: false,
+    });
+
+    (buffer, required_capacity)
+}
+
 struct GPU {
     device: wgpu::Device,
     queue: wgpu::Queue,
     compute_pipeline: wgpu::ComputePipeline,
+
+    buffers: Mutex<Option<GpuBuffers>>,
 }
 
 impl GPU {
@@ -122,6 +155,7 @@ impl GPU {
             device,
             queue,
             compute_pipeline,
+            buffers: Mutex::new(None),
         })
     }
 }
@@ -149,73 +183,171 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
         let start = message_index * padded_message_length_words;
         let end = start + padded_message_length_words;
 
-        pad_message_into(
-            message_bytes,
-            padded_message_length_bytes,
-            &mut message_array[start..end],
-        );
+        pad_message_into(message_bytes, &mut message_array[start..end]);
     }
 
-    let message_buffer = gpu
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+    let mut buffers_guard = gpu.buffers.lock().unwrap();
+
+    let padded_messages_total_bytes = (messages.len() * padded_message_length_words * 4) as u64;
+    let result_size_bytes = (32 * messages.len()) as u64;
+
+    let buffers = buffers_guard.get_or_insert_with(|| {
+        let message_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("messages"),
-            contents: bytemuck::cast_slice(&message_array),
-            usage: wgpu::BufferUsages::STORAGE,
+            size: padded_messages_total_bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
-    let num_messages_buffer = gpu
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("num_messages"),
-            contents: bytemuck::cast_slice(&[num_messages as u32]),
-            usage: wgpu::BufferUsages::STORAGE,
+        let result_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hashes"),
+            size: result_size_bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
         });
+
+        let readback_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: result_size_bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let num_messages_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("num_messages"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let message_sizes_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("message_sizes"),
+            size: 8,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &gpu.compute_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: message_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: num_messages_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: message_sizes_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: result_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("sha256-bind-group"),
+        });
+
+        GpuBuffers {
+            message_buffer,
+            message_buffer_capacity_bytes: padded_messages_total_bytes,
+            result_buffer,
+            result_buffer_capacity_bytes: result_size_bytes,
+            readback_buffer,
+            readback_buffer_capacity_bytes: result_size_bytes,
+            num_messages_buffer,
+            message_sizes_buffer,
+            bind_group,
+        }
+    });
+
+    let (message_buffer, message_capacity) = ensure_buffer_capacity(
+        &gpu.device,
+        Some(buffers.message_buffer.clone()),
+        buffers.message_buffer_capacity_bytes,
+        padded_messages_total_bytes,
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        "messages",
+    );
+
+    let (result_buffer, result_capacity) = ensure_buffer_capacity(
+        &gpu.device,
+        Some(buffers.result_buffer.clone()),
+        buffers.result_buffer_capacity_bytes,
+        result_size_bytes,
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        "hashes",
+    );
+
+    let (readback_buffer, readback_capacity) = ensure_buffer_capacity(
+        &gpu.device,
+        Some(buffers.readback_buffer.clone()),
+        buffers.readback_buffer_capacity_bytes,
+        result_size_bytes,
+        wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        "readback",
+    );
+
+    if message_capacity != buffers.message_buffer_capacity_bytes
+        || result_capacity != buffers.result_buffer_capacity_bytes
+        || readback_capacity != buffers.readback_buffer_capacity_bytes
+    {
+        debug!("Recreating bind group due to buffer capacity change");
+
+        buffers.bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &gpu.compute_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: message_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buffers.num_messages_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buffers.message_sizes_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: result_buffer.as_entire_binding(),
+                },
+            ],
+            label: None,
+        });
+
+        // Update in buffers
+        buffers.message_buffer = message_buffer;
+        buffers.message_buffer_capacity_bytes = message_capacity;
+        buffers.result_buffer = result_buffer;
+        buffers.result_buffer_capacity_bytes = result_capacity;
+        buffers.readback_buffer = readback_buffer;
+        buffers.readback_buffer_capacity_bytes = readback_capacity;
+    }
+
+    gpu.queue.write_buffer(
+        &buffers.message_buffer,
+        0,
+        bytemuck::cast_slice(&message_array),
+    );
+
+    gpu.queue.write_buffer(
+        &buffers.num_messages_buffer,
+        0,
+        bytemuck::cast_slice(&[num_messages]),
+    );
 
     // TODO: Maybe pass these in as two separate inputs.
     // `message_sizes[0]` is the original message length in bytes.
     // `message_sizes[1]` is the padded message length in bytes.
-    let message_sizes: [u32; 2] = [message_length, padded_message_length_bytes];
-    let message_sizes_buffer = gpu
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("message_sizes"),
-            contents: bytemuck::cast_slice(&message_sizes),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-
-    // ---- result buffer (still contiguous on GPU) ----
-    let result_buffer_size = (32 * num_messages) as u64;
-
-    let result_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("hashes"),
-        size: result_buffer_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        layout: &gpu.compute_pipeline.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: message_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: num_messages_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: message_sizes_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: result_buffer.as_entire_binding(),
-            },
-        ],
-        label: None,
-    });
+    gpu.queue.write_buffer(
+        &buffers.message_sizes_buffer,
+        0,
+        bytemuck::cast_slice(&[message_length, padded_message_length_bytes]),
+    );
 
     let mut encoder = gpu
         .device
@@ -224,25 +356,24 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&gpu.compute_pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_bind_group(0, &buffers.bind_group, &[]);
         pass.dispatch_workgroups(num_workgroups, 1, 1);
     }
 
-    let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: result_buffer_size,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    encoder.copy_buffer_to_buffer(&result_buffer, 0, &readback, 0, result_buffer_size);
+    encoder.copy_buffer_to_buffer(
+        &buffers.result_buffer,
+        0,
+        &buffers.readback_buffer,
+        0,
+        result_size_bytes,
+    );
     gpu.queue.submit(Some(encoder.finish()));
 
     // ---- readback ----
     // readback.map_async(wgpu::MapMode::Read).await?;
     // let mapped = readback.slice(..).get_mapped_range();
 
-    let buffer_slice = readback.slice(..);
+    let buffer_slice = buffers.readback_buffer.slice(..);
 
     let map_done = Arc::new(Mutex::new(None));
     let map_done_clone = map_done.clone();
@@ -274,7 +405,7 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     }
 
     drop(mapped);
-    readback.unmap();
+    buffers.readback_buffer.unmap();
 
     Ok(hashes)
 }
@@ -433,6 +564,19 @@ mod tests {
     }
 
     #[test]
+    fn test_sha256_is_valid_69_byte_input() {
+        let input_1 = b"Hello world. Lorem ipsum dolor sit amet, consectetur adipiscing elit.";
+        let expect_1: [u8; 32] = [
+            177, 67, 166, 211, 213, 73, 234, 28, 0, 73, 118, 6, 242, 12, 47, 50, 118, 9, 161, 47,
+            140, 0, 188, 98, 255, 175, 205, 243, 220, 243, 210, 168,
+        ];
+
+        let hashes = run_sha256_gpu(&[&input_1[..]]).unwrap();
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes, vec![expect_1]);
+    }
+
+    #[test]
     fn test_sha256d_in_steps() {
         let input_1 = b"Hello world.\n";
         let expect_1: [u8; 32] = [
@@ -543,7 +687,7 @@ mod padding_tests {
 
         const PADDED_LEN: u32 = calc_padded_message_length_bytes(0);
         let mut padded = [0xFFFFFFFF_u32; PADDED_LEN as usize / 4];
-        pad_message_into(msg, PADDED_LEN, &mut padded);
+        pad_message_into(msg, &mut padded);
 
         // Inspect as raw bytes via u32 decomposition.
         let mut bytes = Vec::new();
@@ -573,7 +717,7 @@ mod padding_tests {
 
         const PADDED_LEN: u32 = calc_padded_message_length_bytes(3);
         let mut padded = [0xFFFFFFFF_u32; PADDED_LEN as usize / 4];
-        pad_message_into(msg, PADDED_LEN, &mut padded[..]);
+        pad_message_into(msg, &mut padded[..]);
 
         let mut bytes = Vec::new();
         for w in &padded {
@@ -605,7 +749,7 @@ mod padding_tests {
 
         const PADDED_LEN: u32 = calc_padded_message_length_bytes(55);
         let mut padded = [0xFFFFFFFF_u32; PADDED_LEN as usize / 4];
-        pad_message_into(&msg, PADDED_LEN, &mut padded[..]);
+        pad_message_into(&msg, &mut padded[..]);
 
         let mut bytes = Vec::new();
         for w in &padded {
@@ -630,7 +774,7 @@ mod padding_tests {
 
         const PADDED_LEN: u32 = calc_padded_message_length_bytes(56);
         let mut padded = [0xFFFFFFFF_u32; PADDED_LEN as usize / 4];
-        pad_message_into(&msg, PADDED_LEN, &mut padded[..]);
+        pad_message_into(&msg, &mut padded[..]);
         assert_eq!(PADDED_LEN, 128);
 
         let mut bytes = Vec::new();
@@ -662,7 +806,7 @@ mod padding_tests {
         const PADDED_LEN: u32 = calc_padded_message_length_bytes(4);
 
         let mut padded = [0xFFFFFFFF_u32; PADDED_LEN as usize / 4];
-        pad_message_into(msg, PADDED_LEN, &mut padded[..]);
+        pad_message_into(msg, &mut padded[..]);
 
         let w = padded[0];
         let b = w.to_ne_bytes();

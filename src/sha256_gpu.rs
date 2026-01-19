@@ -658,6 +658,35 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_single_hash_increasing_message_count() {
+        let mut seed: u64 = 42;
+        for (message_count_loop_num, message_count) in [1, 20, 50, 25, 1].iter().enumerate() {
+            let mut input_data: Vec<Vec<u8>> = Vec::with_capacity(*message_count);
+
+            for _message_num in 0..*message_count {
+                input_data.push(generate_random_array(50, seed));
+                seed += 1;
+            }
+
+            let expected: Vec<[u8; 32]> = input_data.iter().map(|x| sha256(x)).collect();
+
+            let input_slices: Vec<&[u8]> = input_data
+                .iter()
+                .map(|message_bytes| message_bytes.as_slice())
+                .collect();
+
+            let hashes: Vec<[u8; 32]> = run_sha256_gpu(&input_slices).unwrap();
+
+            assert_eq!(hashes.len(), *message_count);
+            assert_eq!(
+                hashes, expected,
+                "Mismatch at message_count={}, message_count_loop_num={}",
+                message_count, message_count_loop_num
+            );
+        }
+    }
 }
 
 // MARK: Test Pad

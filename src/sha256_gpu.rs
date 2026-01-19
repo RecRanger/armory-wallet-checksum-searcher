@@ -238,14 +238,53 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     Ok(hashes)
 }
 
-/// Fetch the maximum allowable number of messages that can be passsed to `run_sha256_gpu()`.
-pub fn max_allowed_message_count_per_operation() -> anyhow::Result<usize> {
-    let device = &get_gpu()?.device;
+/// Logic implementation of max allowed...
+///
+/// Exists as a separate function for testability.
+fn calc_allowed_message_count_per_operation(
+    each_message_length: usize,
+    device_max_wg_size_x: u32,
+    device_max_wg_per_dimension: u32,
+    device_max_buffer_sizes: &[u64],
+) -> usize {
+    use std::cmp::{max, min};
 
     // Based on logic/docs in `calc_num_workgroups()`.
-    let max_wg = device.limits().max_compute_workgroup_size_x;
-    let max_groups = device.limits().max_compute_workgroups_per_dimension;
-    Ok((max_groups * max_wg) as usize)
+    let max_from_workgroups = (device_max_wg_per_dimension * device_max_wg_size_x) as usize;
+
+    // Based on errors about max buffer size.
+    let each_message_length_64_bits = max(each_message_length, 64); // Maybe need padding logic.
+    let device_max_buffer_size = *device_max_buffer_sizes
+        .iter()
+        .min() // Pick the tighter option.
+        .unwrap(); // Unwrap is safe because the array should never be empty.
+    let max_from_buffer = (device_max_buffer_size / each_message_length_64_bits as u64) as usize;
+
+    // Combine. Select the lower value for safety.
+    let max_overall = min(max_from_workgroups, max_from_buffer);
+    max_overall
+}
+
+/// Fetch the maximum allowable number of messages that can be passsed to `run_sha256_gpu()`.
+pub fn max_allowed_message_count_per_operation(
+    each_message_length: usize,
+) -> anyhow::Result<usize> {
+    let device = &get_gpu()?.device;
+
+    let device_max_wg_size_x = device.limits().max_compute_workgroup_size_x;
+    let device_max_wg_per_dimension = device.limits().max_compute_workgroups_per_dimension;
+    let device_max_buffer_sizes: &[u64] = &[
+        device.limits().max_buffer_size,
+        // All the `max_*_buffer_binding_size`
+        device.limits().max_storage_buffer_binding_size as u64,
+    ];
+
+    Ok(calc_allowed_message_count_per_operation(
+        each_message_length,
+        device_max_wg_size_x,
+        device_max_wg_per_dimension,
+        device_max_buffer_sizes,
+    ))
 }
 
 pub fn run_sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
@@ -284,6 +323,8 @@ mod tests {
 
     #[test]
     fn test_max_allowed_message_count_per_operation() {
-        assert!(max_allowed_message_count_per_operation().unwrap() >= 256);
+        assert!(max_allowed_message_count_per_operation(64).unwrap() >= 256);
+        assert!(max_allowed_message_count_per_operation(128).unwrap() >= 256);
+        assert!(max_allowed_message_count_per_operation(4).unwrap() >= 256);
     }
 }

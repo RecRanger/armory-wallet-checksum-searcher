@@ -24,14 +24,16 @@ pub fn search_for_checksums_gpu(
 
     let mut matches: Vec<ChecksumPatternMatch> = Vec::new();
 
-    let max_messages_per_operation = max_allowed_message_count_per_operation()?;
-    info!(
-        "GPU max messages per operation: {}",
-        max_messages_per_operation
-    );
-
     // First, we loop over patterns, because all messages in a GPU request must have the same length.
     for pattern in checksum_patterns {
+        // Determine max number of messages in each group.
+        let max_messages_per_operation =
+            max_allowed_message_count_per_operation(pattern.chunk_len)?;
+        info!(
+            "GPU max messages per operation (for chunk_len={}): {}",
+            pattern.chunk_len, max_messages_per_operation
+        );
+
         // Read in every pattern-chosen chunk to hash.
         let mut message_start_idx: usize = 0;
         let mut message_selection: Vec<&[u8]> = Vec::with_capacity(max_messages_per_operation);

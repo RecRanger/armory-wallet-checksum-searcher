@@ -27,7 +27,7 @@ fn setup_logger(log_file: Option<PathBuf>) -> Result<(), fern::InitError> {
                 message
             ))
         })
-        .level(log::LevelFilter::Debug)
+        .level(log::LevelFilter::Info) // Min level.
         .chain(std::io::stdout());
 
     if let Some(log_file_path) = log_file {

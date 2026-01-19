@@ -215,8 +215,13 @@ fn count_successes_per_pattern(
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr as _;
+
     use super::*;
     use crate::types::ChecksumPatternSpec;
+
+    use rand::rngs::StdRng;
+    use rand::{RngCore, SeedableRng};
 
     #[test]
     fn test_sha256_is_valid() {
@@ -564,6 +569,91 @@ mod tests {
         // Should only find the complete pattern, not the partial one
         assert_eq!(matches.len(), 1, "Should not match incomplete patterns");
         assert_eq!(matches[0].chunk_start_offset, 0);
+    }
+
+    fn generate_random_array(size: usize, seed: u64) -> Vec<u8> {
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        let mut data = vec![0u8; size];
+        rng.fill_bytes(&mut data);
+        data
+    }
+
+    /// Test the `generate_random_array()` function, effectively.
+    ///
+    /// Useful for confirming that the random generation works if the tests using it break.
+    #[test]
+    fn test_reproducible_random_data() {
+        let data = generate_random_array(1024, 42);
+        assert_eq!(data[0], 162);
+
+        let data = generate_random_array(1024, 42);
+        assert_eq!(data[0], 162);
+
+        // Same seed, longer length.
+        let data = generate_random_array(2048, 42);
+        assert_eq!(data[0], 162);
+    }
+
+    // Optionally mark this as a test to find more seeds with random matches.
+    #[allow(dead_code)]
+    fn find_random_seeds_with_matches() {
+        // Considering patterns 16+4, 20+4, and 32+4, seeds 1-15 have no matches.
+        // 16 has a match for 16+4 pattern (now its own test).
+        for seed in 17..100000000 {
+            println!("Trying seed {}", seed);
+            let test_data = generate_random_array(1024 * 1024 * 128, seed);
+
+            let patterns = vec![
+                ChecksumPatternSpec::from_str("16+4").unwrap(),
+                ChecksumPatternSpec::from_str("20+4").unwrap(),
+                ChecksumPatternSpec::from_str("32+4").unwrap(),
+            ];
+
+            let matches = search_for_checksums(&test_data, &patterns);
+
+            assert!(matches.len() == 0, "Match in seed {} - {:?}", seed, matches);
+        }
+    }
+
+    #[test]
+    fn test_with_large_random_data_1() {
+        // Test case found by trial-and-error with find_random_seeds_with_matches()
+        let test_data = generate_random_array(1024 * 1024 * 128, 16);
+
+        let patterns = vec![
+            ChecksumPatternSpec::from_str("16+4").unwrap(),
+            ChecksumPatternSpec::from_str("20+4").unwrap(),
+            ChecksumPatternSpec::from_str("32+4").unwrap(),
+        ];
+
+        let matches = search_for_checksums(&test_data, &patterns);
+
+        assert_eq!(matches.len(), 2);
+        assert_eq!(
+            matches[0],
+            ChecksumPatternMatch {
+                chunk_len: 16,
+                checksum_len: 4,
+                chunk_start_offset: 62168622,
+                chunk_data: vec![
+                    245, 173, 89, 145, 217, 220, 26, 82, 193, 168, 246, 37, 103, 48, 19, 220,
+                ],
+                checksum_data: vec![198, 58, 54, 199],
+            }
+        );
+        assert_eq!(
+            matches[1],
+            ChecksumPatternMatch {
+                chunk_len: 16,
+                checksum_len: 4,
+                chunk_start_offset: 95768888,
+                chunk_data: vec![
+                    143, 152, 37, 241, 153, 137, 49, 135, 118, 71, 201, 154, 224, 112, 21, 238,
+                ],
+                checksum_data: vec![119, 155, 222, 13],
+            },
+        );
     }
 }
 

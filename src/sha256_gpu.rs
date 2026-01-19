@@ -38,11 +38,6 @@ fn pad_message_into(message_bytes: &[u8], padded_len_bytes: u32, output_words: &
     let padded_len_words: usize = (padded_len_bytes / 4) as usize;
     debug_assert_eq!(output_words.len(), padded_len_words);
 
-    // Pre-zero fill the last 9 words (72 bytes) of the message. Ensures any padding is zero.
-    // output_words[(padded_len_words.saturating_sub(19))..(padded_len_words.saturating_sub(0))]
-    //     .fill(0);
-    output_words.fill(0);
-
     let output_bytes = bytemuck::cast_slice_mut::<u32, u8>(output_words);
 
     // Copy message.
@@ -51,9 +46,12 @@ fn pad_message_into(message_bytes: &[u8], padded_len_bytes: u32, output_words: &
     // Append the 0x80 byte.
     output_bytes[message_bytes.len()] = 0x80;
 
-    // Append message length in bits (big endian, 64 bit value).
-    let bit_len = (message_bytes.len() as u64) * 8;
+    // Zero only the required padding bytes (between message and the final length u64).
     let len_pos = output_bytes.len() - 8;
+    output_bytes[(message_bytes.len() + 1)..len_pos].fill(0);
+
+    // Append message length in bits (big endian, 64 bit value, u64).
+    let bit_len = (message_bytes.len() as u64) * 8;
     output_bytes[len_pos..].copy_from_slice(&bit_len.to_be_bytes());
 }
 

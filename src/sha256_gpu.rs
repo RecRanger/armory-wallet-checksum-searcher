@@ -161,7 +161,12 @@ fn get_gpu() -> anyhow::Result<&'static GPU> {
     GPU_INSTANCE.get_or_try_init(|| pollster::block_on(GPU::init()))
 }
 
-pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
+pub async fn sha256_gpu<const N: usize>(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; N]>>
+where
+    [u8; N]: Sized,
+{
+    // static_assertions::const_assert!(N <= 32); // TODO: Enable when in stable Rust.
+
     let gpu = get_gpu()?;
 
     let num_messages: u32 = messages.len() as u32;
@@ -464,8 +469,24 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     let mapped = buffer_slice.get_mapped_range();
 
     // Reshape from long output array into separate hash values for each message.
+    const FULL_HASH_SIZE: usize = 32;
     let valid_bytes = &mapped[..result_size_bytes as usize];
-    let hashes: Vec<[u8; 32]> = bytemuck::cast_slice::<u8, [u8; 32]>(valid_bytes).to_vec();
+    let hashes: Vec<[u8; N]> = {
+        if N == 32 {
+            bytemuck::cast_slice::<u8, [u8; N]>(valid_bytes).to_vec()
+        } else if N > 32 {
+            panic!("Hash size greater than 32 is not supported");
+        } else {
+            valid_bytes
+                .chunks_exact(FULL_HASH_SIZE)
+                .map(|full_hash_bytes| {
+                    let mut truncated_hash = [0u8; N];
+                    truncated_hash.copy_from_slice(&full_hash_bytes[..N]);
+                    truncated_hash
+                })
+                .collect()
+        }
+    };
 
     debug_assert_eq!(hashes.len(), messages.len());
 
@@ -525,8 +546,8 @@ pub fn max_allowed_message_count_per_operation(
 }
 
 #[allow(dead_code)]
-pub fn run_sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
-    pollster::block_on(sha256_gpu(messages))
+pub fn run_sha256_gpu<const N: usize>(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; N]>> {
+    pollster::block_on(sha256_gpu::<N>(messages))
 }
 
 #[allow(dead_code)]
@@ -570,6 +591,37 @@ mod tests {
         let hashes_again = run_sha256_gpu(&[&input_1[..], &input_2[..]]).unwrap();
         assert_eq!(hashes_again.len(), 2);
         assert_eq!(hashes_again, vec![expect_1, expect_2]);
+    }
+
+    #[test]
+    fn test_sha256_4bytes_is_valid_aligned() {
+        let input_1 = b"Hello, wgsl\n";
+        let expect_1: [u8; 4] = [254, 234, 146, 74];
+
+        let input_2 = b"Hello world\n";
+        let expect_2: [u8; 4] = [24, 148, 161, 156];
+
+        let hashes = run_sha256_gpu::<4>(&[&input_1[..], &input_2[..]]).unwrap();
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes, vec![expect_1, expect_2]);
+
+        // Test again to ensure repeated calls work right.
+        let hashes_again = run_sha256_gpu::<4>(&[&input_1[..], &input_2[..]]).unwrap();
+        assert_eq!(hashes_again.len(), 2);
+        assert_eq!(hashes_again, vec![expect_1, expect_2]);
+    }
+
+    #[test]
+    fn test_sha256_12_bytes_is_valid_aligned() {
+        let input_1 = b"Hello, wgsl\n";
+        let expect_1: [u8; 12] = [254, 234, 146, 74, 232, 68, 234, 160, 191, 118, 232, 179];
+
+        let input_2 = b"Hello world\n";
+        let expect_2: [u8; 12] = [24, 148, 161, 156, 133, 186, 21, 58, 203, 247, 67, 172];
+
+        let hashes = run_sha256_gpu::<12>(&[&input_1[..], &input_2[..]]).unwrap();
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes, vec![expect_1, expect_2]);
     }
 
     /// Same-length messages with `len(input) % 4 != 0` (unaligned).

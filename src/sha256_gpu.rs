@@ -10,7 +10,7 @@ use wgpu::util::DeviceExt as _;
 /// - `len_bytes`: Length of the input message (before any padding).
 ///
 /// Returns the padded length of the message.
-fn calc_padded_message_length_bytes(len_bytes: u32) -> u32 {
+const fn calc_padded_message_length_bytes(len_bytes: u32) -> u32 {
     let len_bits = len_bytes * 8;
 
     // Number of bits to add so that:
@@ -18,53 +18,46 @@ fn calc_padded_message_length_bytes(len_bytes: u32) -> u32 {
     let k = (512 - ((len_bits + 1 + 64) % 512)) % 512;
     let total_bits = len_bits + 1 + k + 64;
 
-    debug_assert_eq!(total_bits % 512, 0);
-
     let total_bytes_with_padding = total_bits / 8;
-
-    debug_assert_eq!(total_bytes_with_padding % 4, 0);
-    debug_assert_eq!(total_bytes_with_padding % 64, 0); // SHA-256 invariant
 
     total_bytes_with_padding
 }
 
 /// Pad a message for SHA256 specifically (including appending its length).
 ///
-/// Returns a Vec of length `padded_len_bytes`.
-fn pad_message(bytes: &[u8], padded_len_bytes: u32) -> Vec<u32> {
-    debug_assert!(
-        padded_len_bytes % 4 == 0,
-        "padded_len_bytes must be a multiple of 4"
-    );
+/// Writes the padded message into `output_words`.
+/// The `output_words` slice should be `padded_len_bytes / 4` elements long.
+fn pad_message_into(message_bytes: &[u8], padded_len_bytes: u32, output_words: &mut [u32]) {
+    debug_assert!(padded_len_bytes % 4 == 0);
     debug_assert_eq!(padded_len_bytes % 64, 0);
     debug_assert_eq!(
         padded_len_bytes,
-        calc_padded_message_length_bytes(bytes.len() as u32)
+        calc_padded_message_length_bytes(message_bytes.len() as u32)
     );
 
-    let padded_len_words = (padded_len_bytes / 4) as usize;
-    let mut output_words = vec![0u32; padded_len_words];
+    let padded_len_words: usize = (padded_len_bytes / 4) as usize;
+    debug_assert_eq!(output_words.len(), padded_len_words);
 
-    let buf = bytemuck::cast_slice_mut::<u32, u8>(&mut output_words);
+    // Pre-zero fill the last 9 words (72 bytes) of the message. Ensures any padding is zero.
+    // output_words[(padded_len_words.saturating_sub(19))..(padded_len_words.saturating_sub(0))]
+    //     .fill(0);
+    output_words.fill(0);
+
+    let output_bytes = bytemuck::cast_slice_mut::<u32, u8>(output_words);
 
     // Copy message.
-    buf[..bytes.len()].copy_from_slice(bytes);
+    output_bytes[..message_bytes.len()].copy_from_slice(message_bytes);
 
-    // Append the 0x80 bit.
-    buf[bytes.len()] = 0x80;
+    // Append the 0x80 byte.
+    output_bytes[message_bytes.len()] = 0x80;
 
-    // Append message length in bits (big endian).
-    let bit_len = (bytes.len() as u64) * 8;
-    let len_pos = buf.len() - 8;
-    buf[len_pos..].copy_from_slice(&bit_len.to_be_bytes());
-
-    // Convert to u32 words.
-    debug_assert!(output_words.len() as u32 == (padded_len_bytes / 4));
-
-    output_words
+    // Append message length in bits (big endian, 64 bit value).
+    let bit_len = (message_bytes.len() as u64) * 8;
+    let len_pos = output_bytes.len() - 8;
+    output_bytes[len_pos..].copy_from_slice(&bit_len.to_be_bytes());
 }
 
-fn calc_num_workgroups(device: &wgpu::Device, num_messages: usize) -> u32 {
+fn calc_num_workgroups(device: &wgpu::Device, num_messages: u32) -> u32 {
     let max_wg = device.limits().max_compute_workgroup_size_x;
     let max_groups = device.limits().max_compute_workgroups_per_dimension;
 
@@ -145,17 +138,24 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
 
     let gpu = get_gpu()?;
 
-    let num_messages = messages.len();
+    let num_messages: u32 = messages.len() as u32;
     let num_workgroups = calc_num_workgroups(&gpu.device, num_messages);
 
-    let message_length = messages[0].len();
-    let padded_message_length_bytes = calc_padded_message_length_bytes(message_length as u32);
+    let message_length: u32 = messages[0].len() as u32;
+    let padded_message_length_bytes = calc_padded_message_length_bytes(message_length);
+    let padded_message_length_words: usize = (padded_message_length_bytes as usize) / 4;
 
-    // ---- pack messages ----
-    let mut message_array = Vec::<u32>::new();
-    for msg in messages {
-        let padded = pad_message(msg, padded_message_length_bytes);
-        message_array.extend_from_slice(&padded);
+    // Pack messages.
+    let mut message_array = vec![0u32; messages.len() * padded_message_length_words];
+    for (message_index, message_bytes) in messages.iter().enumerate() {
+        let start = message_index * padded_message_length_words;
+        let end = start + padded_message_length_words;
+
+        pad_message_into(
+            message_bytes,
+            padded_message_length_bytes,
+            &mut message_array[start..end],
+        );
     }
 
     let message_buffer = gpu
@@ -177,7 +177,7 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     // TODO: Maybe pass these in as two separate inputs.
     // `message_sizes[0]` is the original message length in bytes.
     // `message_sizes[1]` is the padded message length in bytes.
-    let message_sizes: [u32; 2] = [message_length as u32, padded_message_length_bytes];
+    let message_sizes: [u32; 2] = [message_length, padded_message_length_bytes];
     let message_sizes_buffer = gpu
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -266,8 +266,8 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     let mapped = buffer_slice.get_mapped_range();
 
     // Reshape from long output array into separate hash values for each message.
-    let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(num_messages);
-    for i in 0..num_messages {
+    let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(messages.len());
+    for i in 0..messages.len() {
         let start = i * 32;
         let end = start + 32;
         let mut hash = [0u8; 32];
@@ -349,6 +349,8 @@ pub fn run_sha256d_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
 
 #[cfg(test)]
 mod tests {
+    use crate::search_with_cpu::sha256;
+
     use super::*;
 
     /// Same-length messages with `len(input) % 4 == 0` (aligned).
@@ -401,6 +403,21 @@ mod tests {
         let hashes_again = run_sha256_gpu(&[&input_1[..], &input_2[..]]).unwrap();
         assert_eq!(hashes_again.len(), 2);
         assert_eq!(hashes_again, vec![expect_1, expect_2]);
+    }
+
+    #[test]
+    fn test_sha256_empty() {
+        let input_1 = b"";
+        let expect_1: [u8; 32] = [
+            0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+            0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
+            0x78, 0x52, 0xb8, 0x55,
+        ];
+        assert_eq!(sha256(input_1), expect_1);
+
+        let hashes = run_sha256_gpu(&[&input_1[..], &input_1[..]]).unwrap();
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes, vec![expect_1, expect_1]);
     }
 
     /// Same-length messages with `len(input) % 4 == 0` (aligned).
@@ -466,6 +483,39 @@ mod tests {
         assert!(max_allowed_message_count_per_operation(128).unwrap() >= 256);
         assert!(max_allowed_message_count_per_operation(4).unwrap() >= 256);
     }
+
+    fn generate_random_array(size: usize, seed: u64) -> Vec<u8> {
+        use rand::rngs::StdRng;
+        use rand::{RngCore, SeedableRng};
+
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        let mut data = vec![0u8; size];
+        rng.fill_bytes(&mut data);
+        data
+    }
+
+    #[test]
+    fn test_single_hash_increasing_lengths() {
+        for input_len in 0..530 {
+            let input_data = generate_random_array(input_len, input_len as u64);
+            let expected = sha256(&input_data);
+            if input_len == 0 {
+                // Sanity check.
+                assert_eq!(expected[0], 0xe3);
+            }
+
+            let hashes = run_sha256_gpu(&[&input_data[..input_len], &input_data[..]]).unwrap();
+            assert_eq!(hashes.len(), 2);
+            assert_eq!(
+                hashes,
+                vec![expected, expected],
+                "Failure at input_len={}, input_data={:?}",
+                input_len,
+                input_data
+            );
+        }
+    }
 }
 
 // MARK: Test Pad
@@ -490,14 +540,14 @@ mod padding_tests {
     }
 
     #[test]
-    fn pad_message_empty() {
+    fn pad_message_into_empty() {
         let msg: &[u8] = b"";
-        let padded_len = calc_padded_message_length_bytes(0);
-        let padded = pad_message(msg, padded_len);
 
-        assert_eq!(padded.len() * 4, padded_len as usize);
+        const PADDED_LEN: u32 = calc_padded_message_length_bytes(0);
+        let mut padded = [0xFFFFFFFF_u32; PADDED_LEN as usize / 4];
+        pad_message_into(msg, PADDED_LEN, &mut padded);
 
-        // Inspect as raw bytes via u32 decomposition
+        // Inspect as raw bytes via u32 decomposition.
         let mut bytes = Vec::new();
         for w in &padded {
             bytes.extend_from_slice(&w.to_ne_bytes());
@@ -506,9 +556,13 @@ mod padding_tests {
         // First byte is 0x80
         assert_eq!(bytes[0], 0x80);
 
-        // All bytes except last 8 are zero
-        for &b in &bytes[1..bytes.len() - 8] {
-            assert_eq!(b, 0);
+        // Zero padding until length.
+        for idx in 1..(bytes.len()) {
+            assert_eq!(
+                bytes[idx], 0,
+                "Expected zero padding then zero value at index {}",
+                idx
+            );
         }
 
         // Length = 0 bits
@@ -516,10 +570,12 @@ mod padding_tests {
     }
 
     #[test]
-    fn pad_message_unaligned() {
+    fn pad_message_into_unaligned() {
         let msg = b"abc";
-        let padded_len = calc_padded_message_length_bytes(msg.len() as u32);
-        let padded = pad_message(msg, padded_len);
+
+        const PADDED_LEN: u32 = calc_padded_message_length_bytes(3);
+        let mut padded = [0xFFFFFFFF_u32; PADDED_LEN as usize / 4];
+        pad_message_into(msg, PADDED_LEN, &mut padded[..]);
 
         let mut bytes = Vec::new();
         for w in &padded {
@@ -532,9 +588,9 @@ mod padding_tests {
         // Padding bit
         assert_eq!(bytes[3], 0x80);
 
-        // Zero padding until length
-        for &b in &bytes[4..bytes.len() - 8] {
-            assert_eq!(b, 0);
+        // Zero padding until length.
+        for idx in 4..(bytes.len() - 8) {
+            assert_eq!(bytes[idx], 0, "Expected zero padding at index {}", idx);
         }
 
         // Length = 24 bits (big endian)
@@ -544,12 +600,14 @@ mod padding_tests {
 
     /// Test 3: Boundary case - 55 bytes (fits in one block)
     #[test]
-    fn pad_message_55_bytes() {
+    fn pad_message_into_55_bytes() {
         let msg = vec![0xAA; 55];
         let padded_len = calc_padded_message_length_bytes(msg.len() as u32);
         assert_eq!(padded_len, 64);
 
-        let padded = pad_message(&msg, padded_len);
+        const PADDED_LEN: u32 = calc_padded_message_length_bytes(55);
+        let mut padded = [0xFFFFFFFF_u32; PADDED_LEN as usize / 4];
+        pad_message_into(&msg, PADDED_LEN, &mut padded[..]);
 
         let mut bytes = Vec::new();
         for w in &padded {
@@ -569,12 +627,13 @@ mod padding_tests {
 
     /// Boundary case (forces a second block).
     #[test]
-    fn pad_message_56_bytes_two_blocks() {
+    fn pad_message_into_56_bytes_two_blocks() {
         let msg = vec![0xBB; 56];
-        let padded_len = calc_padded_message_length_bytes(msg.len() as u32);
-        assert_eq!(padded_len, 128);
 
-        let padded = pad_message(&msg, padded_len);
+        const PADDED_LEN: u32 = calc_padded_message_length_bytes(56);
+        let mut padded = [0xFFFFFFFF_u32; PADDED_LEN as usize / 4];
+        pad_message_into(&msg, PADDED_LEN, &mut padded[..]);
+        assert_eq!(PADDED_LEN, 128);
 
         let mut bytes = Vec::new();
         for w in &padded {
@@ -587,9 +646,9 @@ mod padding_tests {
         // Padding byte
         assert_eq!(bytes[56], 0x80);
 
-        // Zero padding until length
-        for &b in &bytes[57..bytes.len() - 8] {
-            assert_eq!(b, 0);
+        // Zero padding until length.
+        for idx in 57..(bytes.len() - 8) {
+            assert_eq!(bytes[idx], 0, "Expected zero padding at index {}", idx);
         }
 
         // Length field
@@ -599,10 +658,13 @@ mod padding_tests {
 
     // Test 5: Word packing sanity (no casts)
     #[test]
-    fn pad_message_word_byte_order() {
+    fn pad_message_into_word_byte_order() {
         let msg = b"abcd";
-        let padded_len = calc_padded_message_length_bytes(4);
-        let padded = pad_message(msg, padded_len);
+
+        const PADDED_LEN: u32 = calc_padded_message_length_bytes(4);
+
+        let mut padded = [0xFFFFFFFF_u32; PADDED_LEN as usize / 4];
+        pad_message_into(msg, PADDED_LEN, &mut padded[..]);
 
         let w = padded[0];
         let b = w.to_ne_bytes();

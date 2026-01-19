@@ -7,7 +7,7 @@ use log::info;
 use crate::types::{ChecksumPatternMatch, ChecksumPatternSpec};
 
 #[allow(unused)] // Helpful in tests.
-fn sha256(data: &[u8]) -> [u8; 32] {
+pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().into()

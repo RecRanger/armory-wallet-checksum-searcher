@@ -49,5 +49,5 @@ rstest = "0.26.1" # For parameterized tests.
 opt-level = 3
 codegen-units = 1 # Performance optimization attempt.
 panic = "abort"
-strip = true
 lto = "fat" # Performance optimization attempt.
+# strip = true # Makes output binary smaller. When using flamegraph/profiling, set to false/absent.

@@ -2,6 +2,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use log::info;
 
+use crate::search_with_cpu::sha256d;
 use crate::sha256_gpu::{max_allowed_message_count_per_operation, run_sha256_gpu};
 use crate::types::{ChecksumPatternMatch, ChecksumPatternSpec};
 
@@ -34,41 +35,69 @@ pub fn search_for_checksums_gpu(
             pattern.chunk_len, max_messages_per_operation
         );
 
+        // Silly edge case (useful for tests).
+        if data.len() < pattern.total_length() {
+            continue;
+        }
+
         // Read in every pattern-chosen chunk to hash.
         let mut message_start_idx: usize = 0;
         let mut message_selection: Vec<&[u8]> = Vec::with_capacity(max_messages_per_operation);
-        while message_start_idx < data.len() - pattern.total_length() {
+        while message_start_idx <= data.len() - pattern.total_length() {
             // Store the start index if the first element in this batch.
             let these_messages_start_idx = message_start_idx;
 
             // Fill the message buffer to send in bulk.
-            while (message_start_idx < data.len() - pattern.total_length())
+            while (message_start_idx <= data.len() - pattern.total_length())
                 && (message_selection.len() < max_messages_per_operation)
             {
-                message_selection
-                    .push(&data[message_start_idx..message_start_idx + pattern.chunk_len]);
+                let chunk_data = &data[message_start_idx..message_start_idx + pattern.chunk_len];
+                debug_assert_eq!(chunk_data.len(), pattern.chunk_len);
+                message_selection.push(chunk_data);
 
                 message_start_idx += 1;
             }
 
             // Send the buffer for hashing.
-            let hash_results: Vec<[u8; 32]> = run_sha256_gpu(&message_selection)?;
+            // let hash_results: Vec<[u8; 32]> = run_sha256_gpu(&message_selection)?;
 
-            assert_eq!(hash_results.len(), message_selection.len());
+            // debug_assert_eq!(hash_results.len(), message_selection.len());
 
-            // FIXME: Need to double-hash here.
+            // // TODO: Move the double-hash step into the shader to avoid martialling through RAM.
+
+            // let hash_results: Vec<[u8; 32]> = run_sha256_gpu(
+            //     &hash_results
+            //         .iter()
+            //         .map(|h| h.as_ref())
+            //         .collect::<Vec<&[u8]>>(),
+            // )?;
+            // debug_assert_eq!(hash_results.len(), message_selection.len());
+
+            let hash_results: Vec<[u8; 32]> =
+                message_selection.iter().map(|x| sha256d(x)).collect();
 
             // Check for any matches. Log and push.
             for message_num in 0..hash_results.len() {
+                let hash_result = hash_results[message_num];
+
                 let chunk_start_idx = these_messages_start_idx + message_num;
+
+                debug_assert_eq!(
+                    sha256d(message_selection[message_num]),
+                    hash_results[message_num]
+                );
+
+                let chunk_and_checksum: &[u8] =
+                    &data[chunk_start_idx..chunk_start_idx + pattern.total_length()];
 
                 let checksum_in_data: &[u8] = &data
                     [chunk_start_idx + pattern.chunk_len..chunk_start_idx + pattern.total_length()];
 
-                if checksum_in_data == hash_results[message_num] {
+                debug_assert_eq!(checksum_in_data.len(), pattern.checksum_len);
+                debug_assert_eq!(chunk_and_checksum.len(), pattern.total_length());
+
+                if hash_result[..pattern.checksum_len] == chunk_and_checksum[pattern.chunk_len..] {
                     // This condition is very rare, and is the success case!
-                    let chunk_and_checksum =
-                        &data[chunk_start_idx..chunk_start_idx + pattern.total_length()];
 
                     info!(
                         "✅ Match! Offset: {}=0x{:x}, Chunk Length: {}, Chunk: {:x?}, Hash: {:x?}",
@@ -76,7 +105,7 @@ pub fn search_for_checksums_gpu(
                         chunk_start_idx,
                         pattern.chunk_len,
                         chunk_and_checksum[..pattern.chunk_len].to_vec(),
-                        hash_results[message_num]
+                        hash_result
                     );
 
                     matches.push(ChecksumPatternMatch {

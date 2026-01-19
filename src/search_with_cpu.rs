@@ -13,7 +13,7 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn sha256d(data: &[u8]) -> [u8; 32] {
+pub fn sha256d(data: &[u8]) -> [u8; 32] {
     // Basic: sha256(&sha256(data))
     let mut hasher = Sha256::new();
     hasher.update(data);

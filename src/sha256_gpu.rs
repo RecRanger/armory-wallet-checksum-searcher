@@ -141,7 +141,7 @@ fn get_gpu() -> anyhow::Result<&'static GPU> {
 }
 
 pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
-    validate_messages(&messages);
+    validate_messages(messages);
 
     let gpu = get_gpu()?;
 
@@ -330,8 +330,19 @@ pub fn max_allowed_message_count_per_operation(
     ))
 }
 
+#[allow(dead_code)]
 pub fn run_sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     pollster::block_on(sha256_gpu(messages))
+}
+
+#[allow(dead_code)]
+pub fn run_sha256d_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
+    let hash_out_1: Vec<[u8; 32]> = pollster::block_on(sha256_gpu(messages))?;
+
+    let hash_out_2: Vec<[u8; 32]> = pollster::block_on(sha256_gpu(
+        &hash_out_1.iter().map(|h| &h[..]).collect::<Vec<&[u8]>>(),
+    ))?;
+    Ok(hash_out_2)
 }
 
 // MARK: Tests
@@ -390,6 +401,63 @@ mod tests {
         let hashes_again = run_sha256_gpu(&[&input_1[..], &input_2[..]]).unwrap();
         assert_eq!(hashes_again.len(), 2);
         assert_eq!(hashes_again, vec![expect_1, expect_2]);
+    }
+
+    /// Same-length messages with `len(input) % 4 == 0` (aligned).
+    #[test]
+    fn test_sha256_is_valid_aligned_single_item() {
+        let input_1 = b"Hello, wgsl\n";
+        let expect_1: [u8; 32] = [
+            254, 234, 146, 74, 232, 68, 234, 160, 191, 118, 232, 179, 211, 60, 233, 49, 144, 98,
+            156, 231, 56, 159, 25, 217, 66, 189, 1, 131, 11, 167, 119, 180,
+        ];
+
+        let hashes = run_sha256_gpu(&[&input_1[..]]).unwrap();
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes, vec![expect_1]);
+    }
+
+    #[test]
+    fn test_sha256d_in_steps() {
+        let input_1 = b"Hello world.\n";
+        let expect_1: [u8; 32] = [
+            // 6472bf692aaf270d5f9dc40c5ecab8f826ecc92425c8bac4d1ea69bcbbddaea4
+            0x64, 0x72, 0xbf, 0x69, 0x2a, 0xaf, 0x27, 0x0d, 0x5f, 0x9d, 0xc4, 0x0c, 0x5e, 0xca,
+            0xb8, 0xf8, 0x26, 0xec, 0xc9, 0x24, 0x25, 0xc8, 0xba, 0xc4, 0xd1, 0xea, 0x69, 0xbc,
+            0xbb, 0xdd, 0xae, 0xa4,
+        ];
+
+        let hashes_1 = run_sha256_gpu(&[&input_1[..]]).unwrap();
+        assert_eq!(hashes_1.len(), 1);
+        assert_eq!(hashes_1, vec![expect_1]);
+
+        // Now, hash expect_1 and get expect_2.
+        let expect_2: [u8; 32] = [
+            184, 215, 246, 75, 181, 105, 139, 209, 5, 34, 213, 195, 67, 95, 62, 167, 203, 177, 223,
+            133, 225, 14, 113, 253, 51, 66, 99, 113, 155, 48, 140, 144,
+        ];
+
+        let hashes_2 = run_sha256_gpu(&[&expect_1[..]]).unwrap();
+        assert_eq!(hashes_2.len(), 1);
+        assert_eq!(hashes_2, vec![expect_2]);
+    }
+
+    #[test]
+    fn test_sha256d_is_valid() {
+        let input = b"Hello world.\n";
+        let expected: [u8; 32] = [
+            184, 215, 246, 75, 181, 105, 139, 209, 5, 34, 213, 195, 67, 95, 62, 167, 203, 177, 223,
+            133, 225, 14, 113, 253, 51, 66, 99, 113, 155, 48, 140, 144,
+        ];
+
+        let hashes = run_sha256d_gpu(&[&input[..], &input[..]]).unwrap();
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes, vec![expected, expected]);
+
+        // Test again to ensure repeated calls work right.
+        let hashes_again = run_sha256d_gpu(&[&input[..], &input[..]]).unwrap();
+        assert_eq!(hashes_again.len(), 2);
+        assert_eq!(hashes_again, vec![expected, expected]);
     }
 
     #[test]

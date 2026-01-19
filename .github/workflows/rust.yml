@@ -10,20 +10,31 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  WGPU_BACKEND: vulkan
+  WGPU_POWER_PREF: low
 
 jobs:
   build:
-    # runs-on: ubuntu-latest
-    runs-on:
-      group: cuda-gpu-runner-group
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install Vulkan + SwiftShader
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libvulkan1 \
+            vulkan-tools \
+            mesa-vulkan-drivers
+
+      - name: Verify Vulkan
+        run: vulkaninfo | head -n 50
+
       - name: Build
         run: cargo build --verbose
 
-      - name: Run tests
+      - name: Run tests (wgpu compute)
         run: cargo test --verbose
 
   publish:

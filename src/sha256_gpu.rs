@@ -369,10 +369,7 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     );
     gpu.queue.submit(Some(encoder.finish()));
 
-    // ---- readback ----
-    // readback.map_async(wgpu::MapMode::Read).await?;
-    // let mapped = readback.slice(..).get_mapped_range();
-
+    // Read back from the GPU.
     let buffer_slice = buffers.readback_buffer.slice(..);
 
     let map_done = Arc::new(Mutex::new(None));
@@ -382,11 +379,10 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
         *map_done_clone.lock().unwrap() = Some(result);
     });
 
-    // VERY IMPORTANT: drive the mapping to completion
-    // gpu.device.poll(wgpu::Maintain::Wait);
+    // VERY IMPORTANT: Drive the mapping to completion.
     gpu.device.poll(wgpu::PollType::wait_indefinitely())?;
 
-    // Check mapping result
+    // Check mapping result.
     match map_done.lock().unwrap().take().unwrap() {
         Ok(()) => {}
         Err(e) => return Err(e.into()),

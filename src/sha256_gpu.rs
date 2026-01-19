@@ -42,7 +42,10 @@ fn pad_message(bytes: &[u8], padded_len_bytes: u32) -> Vec<u32> {
         calc_padded_message_length_bytes(bytes.len() as u32)
     );
 
-    let mut buf: Vec<u8> = vec![0u8; padded_len_bytes as usize];
+    let padded_len_words = (padded_len_bytes / 4) as usize;
+    let mut output_words = vec![0u32; padded_len_words];
+
+    let buf = bytemuck::cast_slice_mut::<u32, u8>(&mut output_words);
 
     // Copy message.
     buf[..bytes.len()].copy_from_slice(bytes);
@@ -56,12 +59,9 @@ fn pad_message(bytes: &[u8], padded_len_bytes: u32) -> Vec<u32> {
     buf[len_pos..].copy_from_slice(&bit_len.to_be_bytes());
 
     // Convert to u32 words.
-    // let output = bytemuck::cast_vec::<u8, u32>(buf);
-    let output: Vec<u32> = bytemuck::pod_collect_to_vec(&buf);
+    debug_assert!(output_words.len() as u32 == (padded_len_bytes / 4));
 
-    debug_assert!(output.len() as u32 == (padded_len_bytes / 4));
-
-    output
+    output_words
 }
 
 fn calc_num_workgroups(device: &wgpu::Device, num_messages: usize) -> u32 {

@@ -14,7 +14,7 @@ pub fn search_for_checksums_gpu(
     let progress_bar = ProgressBar::new(data.len() as u64);
     progress_bar.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({binary_bytes_per_sec}) - ETA {eta}")
+            .template("GPU: {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({binary_bytes_per_sec}) - ETA {eta}")
             .unwrap()
             .progress_chars("#>-"),
     );
@@ -22,11 +22,12 @@ pub fn search_for_checksums_gpu(
         // Hide the progress bar on small datasets. Important for keeping test output clean.
         progress_bar.set_draw_target(ProgressDrawTarget::hidden());
     }
+    progress_bar.set_position(0); // Set to 0 at the start to show it.
 
     let mut matches: Vec<ChecksumPatternMatch> = Vec::new();
 
     // First, we loop over patterns, because all messages in a GPU request must have the same length.
-    for pattern in checksum_patterns {
+    for (pattern_idx, pattern) in checksum_patterns.iter().enumerate() {
         // Determine max number of messages in each group.
         let max_messages_per_operation =
             max_allowed_message_count_per_operation(pattern.chunk_len)?;
@@ -44,8 +45,8 @@ pub fn search_for_checksums_gpu(
         let mut message_start_idx: usize = 0;
         let mut message_selection: Vec<&[u8]> = Vec::with_capacity(max_messages_per_operation);
         while message_start_idx <= data.len() - pattern.total_length() {
-            // Store the start index if the first element in this batch.
-            let these_messages_start_idx = message_start_idx;
+            // Store the start index of the first element in this batch.
+            let message_batch_start_offset = message_start_idx;
 
             // Fill the message buffer to send in bulk.
             while (message_start_idx <= data.len() - pattern.total_length())
@@ -59,28 +60,31 @@ pub fn search_for_checksums_gpu(
             }
 
             // Send the buffer for hashing.
-            // let hash_results: Vec<[u8; 32]> = run_sha256_gpu(&message_selection)?;
+            let hash_results: Vec<[u8; 32]> = run_sha256_gpu(&message_selection)?;
 
-            // debug_assert_eq!(hash_results.len(), message_selection.len());
+            debug_assert_eq!(hash_results.len(), message_selection.len());
 
-            // // TODO: Move the double-hash step into the shader to avoid martialling through RAM.
+            // TODO: Move the double-hash step into the shader to avoid martialling through RAM.
 
-            // let hash_results: Vec<[u8; 32]> = run_sha256_gpu(
-            //     &hash_results
-            //         .iter()
-            //         .map(|h| h.as_ref())
-            //         .collect::<Vec<&[u8]>>(),
-            // )?;
-            // debug_assert_eq!(hash_results.len(), message_selection.len());
+            let hash_results: Vec<[u8; 32]> = run_sha256_gpu(
+                &hash_results
+                    .iter()
+                    .map(|h| h.as_ref())
+                    .collect::<Vec<&[u8]>>(),
+            )?;
 
-            let hash_results: Vec<[u8; 32]> =
-                message_selection.iter().map(|x| sha256d(x)).collect();
+            // CPU-based override for this logic style.
+            // let hash_results: Vec<[u8; 32]> =
+            //     message_selection.iter().map(|x| sha256d(x)).collect();
+
+            // Critical premise.
+            debug_assert_eq!(hash_results.len(), message_selection.len());
 
             // Check for any matches. Log and push.
             for message_num in 0..hash_results.len() {
                 let hash_result = hash_results[message_num];
 
-                let chunk_start_idx = these_messages_start_idx + message_num;
+                let chunk_start_idx = message_batch_start_offset + message_num;
 
                 debug_assert_eq!(
                     sha256d(message_selection[message_num]),
@@ -122,6 +126,13 @@ pub fn search_for_checksums_gpu(
 
             // Clear the message selection for the next batch.
             message_selection.clear();
+
+            // Update the progress bar. We want to total bytes size to show the total file size, so we
+            // have to count the data from the completed patterns, and then divide by the number of patterns.
+            progress_bar.set_position(
+                (((data.len() * pattern_idx) + (message_start_idx)) / (checksum_patterns.len()))
+                    as u64,
+            );
         }
     }
 

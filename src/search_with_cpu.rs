@@ -97,7 +97,7 @@ pub fn search_for_checksums_cpu(
     let progress_bar = ProgressBar::new(data.len() as u64);
     progress_bar.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({binary_bytes_per_sec}) - ETA {eta}")
+            .template("CPU: {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({binary_bytes_per_sec}) - ETA {eta}")
             .unwrap()
             .progress_chars("#>-"),
     );

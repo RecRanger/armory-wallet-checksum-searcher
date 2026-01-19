@@ -370,7 +370,9 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     gpu.queue.submit(Some(encoder.finish()));
 
     // Read back from the GPU.
-    let buffer_slice = buffers.readback_buffer.slice(..);
+    // Must include upper bound here in case the readback_buffer is oversized.
+    // Is a real case.
+    let buffer_slice = buffers.readback_buffer.slice(0..result_size_bytes);
 
     let map_done = Arc::new(Mutex::new(None));
     let map_done_clone = map_done.clone();
@@ -391,14 +393,10 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     let mapped = buffer_slice.get_mapped_range();
 
     // Reshape from long output array into separate hash values for each message.
-    let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(messages.len());
-    for i in 0..messages.len() {
-        let start = i * 32;
-        let end = start + 32;
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&mapped[start..end]);
-        hashes.push(hash);
-    }
+    let valid_bytes = &mapped[..result_size_bytes as usize];
+    let hashes: Vec<[u8; 32]> = bytemuck::cast_slice::<u8, [u8; 32]>(valid_bytes).to_vec();
+
+    debug_assert_eq!(hashes.len(), messages.len());
 
     drop(mapped);
     buffers.readback_buffer.unmap();

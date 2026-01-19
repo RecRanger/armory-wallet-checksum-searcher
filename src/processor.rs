@@ -37,6 +37,65 @@ fn compute_checksum(data: &[u8]) -> [u8; 32] {
     sha256d(data)
 }
 
+/// Find all checksum pattern matches at a given offset in the data.
+///
+/// Searches all pattern specs, starting from the chunk_start_idx.
+fn find_matches_at_offset(
+    data: &[u8],
+    checksum_patterns: &[ChecksumPatternSpec],
+    chunk_start_idx: usize,
+    max_checksum_pattern_total_length: usize,
+) -> Vec<ChecksumPatternMatch> {
+    // This function _could_ return multiple matches (as many tests assert) with subset patterns.
+    // Create a local Vec to make it possible to return many matches.
+    // Performance: Constructing this empty Vec does not result in an allocation performance
+    // penalty. The allocation cost is only paid on insertion (rare).
+    let mut local_matches = Vec::new();
+
+    // Skip if chunk and checksum are all zeros (check once for longest pattern only).
+    // First, safety check for right at the end of the dataset, avoid array overruns.
+    if chunk_start_idx + max_checksum_pattern_total_length < data.len()
+        && data[chunk_start_idx..(chunk_start_idx + max_checksum_pattern_total_length)]
+            .iter()
+            .all(|&x| x == 0)
+    {
+        return local_matches;
+    }
+
+    for pattern in checksum_patterns {
+        if chunk_start_idx + pattern.total_length() > data.len() {
+            continue;
+        }
+
+        let chunk_and_checksum = &data[chunk_start_idx..chunk_start_idx + pattern.total_length()];
+
+        let hash_result = compute_checksum(&chunk_and_checksum[..pattern.chunk_len]);
+
+        // Success criteria: Hash output matches.
+        if hash_result[..pattern.checksum_len] == chunk_and_checksum[pattern.chunk_len..] {
+            info!(
+                "✅ Match! Offset: {}=0x{:x}, Chunk Length: {}, Chunk: {:x?}, Hash: {:x?}",
+                chunk_start_idx,
+                chunk_start_idx,
+                pattern.chunk_len,
+                chunk_and_checksum[..pattern.chunk_len].to_vec(),
+                hash_result
+            );
+
+            local_matches.push(ChecksumPatternMatch {
+                chunk_len: pattern.chunk_len,
+                checksum_len: pattern.checksum_len,
+                chunk_start_offset: chunk_start_idx as u64,
+                chunk_data: chunk_and_checksum[..pattern.chunk_len].to_vec(),
+                checksum_data: chunk_and_checksum[pattern.chunk_len..pattern.total_length()]
+                    .to_vec(),
+            });
+        }
+    }
+
+    local_matches
+}
+
 fn search_for_checksums(
     data: &[u8],
     checksum_patterns: &[ChecksumPatternSpec],
@@ -65,55 +124,12 @@ fn search_for_checksums(
         .into_par_iter()
         .progress_with(progress_bar.clone())
         .flat_map(|chunk_start_idx| {
-            // This closure _could_ return multiple matches (as many tests assert).
-            // Create a local Vec to make it possible to return many matches.
-            // Performance: Constructing this empty Vec does not result in an allocation performance
-            // penalty. The allocation cost is only paid on insertion.
-            let mut local_matches = Vec::new();
-
-            // Skip if chunk and checksum are all zeros (check once for longest pattern only).
-            // First, safety check for right at the end of the dataset, avoid array overruns.
-            if chunk_start_idx + max_checksum_pattern_total_length < data.len()
-                && data[chunk_start_idx..(chunk_start_idx + max_checksum_pattern_total_length)]
-                    .iter()
-                    .all(|&x| x == 0)
-            {
-                return local_matches;
-            }
-
-            for pattern in checksum_patterns {
-                if chunk_start_idx + pattern.total_length() > data.len() {
-                    continue;
-                }
-
-                let chunk_and_checksum =
-                    &data[chunk_start_idx..chunk_start_idx + pattern.total_length()];
-
-                let hash_result = compute_checksum(&chunk_and_checksum[..pattern.chunk_len]);
-
-                if hash_result[..pattern.checksum_len] == chunk_and_checksum[pattern.chunk_len..] {
-                    info!(
-                        "✅ Match! Offset: {}=0x{:x}, Chunk Length: {}, Chunk: {:x?}, Hash: {:x?}",
-                        chunk_start_idx,
-                        chunk_start_idx,
-                        pattern.chunk_len,
-                        chunk_and_checksum[..pattern.chunk_len].to_vec(),
-                        hash_result
-                    );
-
-                    local_matches.push(ChecksumPatternMatch {
-                        chunk_len: pattern.chunk_len,
-                        checksum_len: pattern.checksum_len,
-                        chunk_start_offset: chunk_start_idx as u64,
-                        chunk_data: chunk_and_checksum[..pattern.chunk_len].to_vec(),
-                        checksum_data: chunk_and_checksum
-                            [pattern.chunk_len..pattern.total_length()]
-                            .to_vec(),
-                    });
-                }
-            }
-
-            local_matches
+            find_matches_at_offset(
+                data,
+                checksum_patterns,
+                chunk_start_idx,
+                max_checksum_pattern_total_length,
+            )
         })
         .collect();
 
@@ -148,32 +164,51 @@ pub fn process_file(
 
     let start_time = Instant::now();
 
-    // Initialize success count map
+    // Search the entire file for every pattern. This is the main long operation.
+    let pattern_matches = search_for_checksums(&mmap[..], checksum_patterns);
+
+    // Log performance stats.
+    let duration = start_time.elapsed();
+    let data_rate_mebibytes_per_sec =
+        (mmap.len() as f64) / duration.as_secs_f64() / (1024.0 * 1024.0);
+    let hash_rate_hash_per_sec =
+        (mmap.len() as f64) * (checksum_patterns.len() as f64) / duration.as_secs_f64();
+    info!(
+        "Completed in {:?} ({:.3} MiB/s, {:.3} MH/s)",
+        duration,
+        data_rate_mebibytes_per_sec,
+        hash_rate_hash_per_sec / 1e6,
+    );
+
+    // Log results stats.
+    let successes_per_pattern = count_successes_per_pattern(checksum_patterns, &pattern_matches);
+    info!(
+        "Total successes: {} = {:?}",
+        pattern_matches.len(),
+        successes_per_pattern
+    );
+
+    Ok(pattern_matches)
+}
+
+/// Count how many successes of each pattern type.
+fn count_successes_per_pattern(
+    checksum_patterns: &[ChecksumPatternSpec],
+    pattern_matches: &Vec<ChecksumPatternMatch>,
+) -> IndexMap<String, i32> {
     let mut checksum_pattern_success_count: IndexMap<String, i32> = IndexMap::new();
     for checksum_pattern in checksum_patterns {
         checksum_pattern_success_count.insert(checksum_pattern.to_string(), 0);
     }
 
-    // Search the entire file
-    let pattern_matches = search_for_checksums(&mmap[..], checksum_patterns);
-
-    // Update success counts
-    let total_success_count = pattern_matches.len();
-    for pattern_match in &pattern_matches {
+    for pattern_match in pattern_matches {
         let pattern_str = pattern_match.to_checksum_pattern_string();
         let count = checksum_pattern_success_count
             .entry(pattern_str)
             .or_insert(0);
         *count += 1;
     }
-
-    let duration = start_time.elapsed();
-    info!(
-        "Completed in {:?}, Total successes: {} = {:?}",
-        duration, total_success_count, checksum_pattern_success_count
-    );
-
-    Ok(pattern_matches)
+    checksum_pattern_success_count
 }
 
 // MARK: Tests

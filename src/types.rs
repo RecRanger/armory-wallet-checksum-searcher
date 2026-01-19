@@ -1,6 +1,5 @@
-use std::str::FromStr;
 use serde::Serialize;
-
+use std::str::FromStr;
 
 #[derive(Debug, Clone)]
 pub struct ChecksumPatternSpec {
@@ -44,6 +43,7 @@ impl ChecksumPatternSpec {
     }
 }
 
+/// Main result output specification.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ChecksumPatternMatch {
     pub chunk_len: usize,

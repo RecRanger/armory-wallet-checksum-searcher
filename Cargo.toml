@@ -43,6 +43,7 @@ once_cell = "1.21.3"
 
 [dev-dependencies]
 rand = "0.8" # For test data only.
+rstest = "0.26.1" # For parameterized tests.
 
 [profile.release]
 opt-level = 3

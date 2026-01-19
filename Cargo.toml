@@ -34,6 +34,13 @@ indicatif = { version = "0.18.3", features = ["rayon"] }
 # Parallel execution.
 rayon = "1.11.0"
 
+# GPU execution.
+wgpu = { version = "28.0.0", features = ["wgsl"] }
+pollster = "0.4.0"
+bytemuck = { version = "1.24.0", features = ["derive"]}
+anyhow = "1.0.100"
+once_cell = "1.21.3"
+
 [dev-dependencies]
 rand = "0.8" # For test data only.
 

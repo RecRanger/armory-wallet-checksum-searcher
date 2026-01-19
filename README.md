@@ -39,3 +39,5 @@ sudo cargo run --release -- -i /dev/sda --log ./output_log.log --ndjson ./output
 ## Contributing
 
 Please Star this repo if it's helpful. Open Issues.
+
+WGPU Tutorial: https://sotrh.github.io/learn-wgpu/compute/introduction/

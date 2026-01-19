@@ -1,4 +1,5 @@
 mod processor;
+mod processor_gpu;
 mod types;
 
 use processor::process_file;

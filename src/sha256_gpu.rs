@@ -57,16 +57,11 @@ fn calc_num_workgroups(device: &wgpu::Device, num_messages: u32) -> u32 {
     num
 }
 
-fn validate_messages(messages: &[&[u8]]) {
-    let len = messages[0].len();
-    for m in messages {
-        if m.len() != len {
-            panic!("Messages must have the same size");
-        }
-    }
-}
-
 struct GpuBuffers {
+    // Overall data path message_upload_buffer -> message_buffer -> result_buffer -> readback_buffer.
+    message_upload_buffer: wgpu::Buffer,
+    message_upload_capacity_bytes: u64,
+
     message_buffer: wgpu::Buffer,
     message_buffer_capacity_bytes: u64,
 
@@ -89,6 +84,7 @@ fn ensure_buffer_capacity(
     required_capacity: u64,
     usage: wgpu::BufferUsages,
     label: &str,
+    mapped_at_creation: bool,
 ) -> (wgpu::Buffer, u64) {
     if let Some(buffer) = existing {
         if existing_capacity >= required_capacity {
@@ -100,7 +96,7 @@ fn ensure_buffer_capacity(
         label: Some(label),
         size: required_capacity,
         usage,
-        mapped_at_creation: false,
+        mapped_at_creation,
     });
 
     (buffer, required_capacity)
@@ -166,8 +162,6 @@ fn get_gpu() -> anyhow::Result<&'static GPU> {
 }
 
 pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
-    validate_messages(messages);
-
     let gpu = get_gpu()?;
 
     let num_messages: u32 = messages.len() as u32;
@@ -180,18 +174,39 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     // Pack messages.
     let mut message_array = vec![0u32; messages.len() * padded_message_length_words];
     for (message_index, message_bytes) in messages.iter().enumerate() {
+        // Validate that all messages are the same length! Critical requirement.
+        if message_bytes.len() != message_length as usize {
+            panic!(
+                "All messages must have the same length. Message #{}'s length is {} but expected {}.",
+                message_index,
+                message_bytes.len(),
+                message_length
+            );
+        }
+
+        // Pad. Only pass in the slice to write to.
         let start = message_index * padded_message_length_words;
         let end = start + padded_message_length_words;
-
         pad_message_into(message_bytes, &mut message_array[start..end]);
     }
 
-    let mut buffers_guard = gpu.buffers.lock().unwrap();
+    // let mut buffers_guard = gpu.buffers.lock().unwrap();
+    let mut buffers_guard = match gpu.buffers.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
 
     let padded_messages_total_bytes = (messages.len() * padded_message_length_words * 4) as u64;
     let result_size_bytes = (32 * messages.len()) as u64;
 
     let buffers = buffers_guard.get_or_insert_with(|| {
+        let message_upload_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("message_upload"),
+            size: padded_messages_total_bytes,
+            usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false, // Important.
+        });
+
         let message_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("messages"),
             size: padded_messages_total_bytes,
@@ -251,6 +266,8 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
         });
 
         GpuBuffers {
+            message_upload_buffer,
+            message_upload_capacity_bytes: padded_messages_total_bytes,
             message_buffer,
             message_buffer_capacity_bytes: padded_messages_total_bytes,
             result_buffer,
@@ -263,6 +280,16 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
         }
     });
 
+    let (message_upload_buffer, message_upload_capacity) = ensure_buffer_capacity(
+        &gpu.device,
+        Some(buffers.message_upload_buffer.clone()),
+        buffers.message_upload_capacity_bytes,
+        padded_messages_total_bytes,
+        wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+        "message_upload",
+        false, // Important.
+    );
+
     let (message_buffer, message_capacity) = ensure_buffer_capacity(
         &gpu.device,
         Some(buffers.message_buffer.clone()),
@@ -270,6 +297,7 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
         padded_messages_total_bytes,
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         "messages",
+        false,
     );
 
     let (result_buffer, result_capacity) = ensure_buffer_capacity(
@@ -279,6 +307,7 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
         result_size_bytes,
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         "hashes",
+        false,
     );
 
     let (readback_buffer, readback_capacity) = ensure_buffer_capacity(
@@ -286,11 +315,13 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
         Some(buffers.readback_buffer.clone()),
         buffers.readback_buffer_capacity_bytes,
         result_size_bytes,
-        wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         "readback",
+        false,
     );
 
-    if message_capacity != buffers.message_buffer_capacity_bytes
+    if message_upload_capacity != buffers.message_upload_capacity_bytes
+        || message_capacity != buffers.message_buffer_capacity_bytes
         || result_capacity != buffers.result_buffer_capacity_bytes
         || readback_capacity != buffers.readback_buffer_capacity_bytes
     {
@@ -299,6 +330,8 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
         buffers.bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &gpu.compute_pipeline.get_bind_group_layout(0),
             entries: &[
+                // Note: We exclude the message_upload_buffer and the readback_buffer here.
+                // Those buffers are CPU-size only, and only accessed by copying.
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: message_buffer.as_entire_binding(),
@@ -320,6 +353,8 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
         });
 
         // Update in buffers
+        buffers.message_upload_buffer = message_upload_buffer;
+        buffers.message_upload_capacity_bytes = message_upload_capacity;
         buffers.message_buffer = message_buffer;
         buffers.message_buffer_capacity_bytes = message_capacity;
         buffers.result_buffer = result_buffer;
@@ -328,11 +363,40 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
         buffers.readback_buffer_capacity_bytes = readback_capacity;
     }
 
-    gpu.queue.write_buffer(
-        &buffers.message_buffer,
-        0,
-        bytemuck::cast_slice(&message_array),
-    );
+    // gpu.queue.write_buffer(
+    //     &buffers.message_buffer,
+    //     0,
+    //     bytemuck::cast_slice(&message_array),
+    // );
+
+    let upload_buffer_slice = buffers
+        .message_upload_buffer
+        .slice(0..padded_messages_total_bytes);
+
+    let upload_map_done = Arc::new(Mutex::new(None));
+    let upload_map_done_clone = upload_map_done.clone();
+    upload_buffer_slice.map_async(wgpu::MapMode::Write, move |result| {
+        *upload_map_done_clone.lock().unwrap() = Some(result);
+    });
+
+    // VERY IMPORTANT: Drive the mapping to completion.
+    gpu.device.poll(wgpu::PollType::wait_indefinitely())?;
+
+    // Check mapping result.
+    match upload_map_done.lock().unwrap().take().unwrap() {
+        Ok(()) => {}
+        Err(e) => return Err(e.into()),
+    }
+
+    {
+        let mut mapped_range = upload_buffer_slice.get_mapped_range_mut();
+
+        let dst_u32: &mut [u32] = bytemuck::cast_slice_mut(&mut mapped_range[..]);
+
+        dst_u32[..message_array.len()].copy_from_slice(&message_array);
+        // Note: Do not unmap here, intentionally.
+    }
+    buffers.message_upload_buffer.unmap();
 
     gpu.queue.write_buffer(
         &buffers.num_messages_buffer,
@@ -352,6 +416,14 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     let mut encoder = gpu
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+
+    encoder.copy_buffer_to_buffer(
+        &buffers.message_upload_buffer,
+        0,
+        &buffers.message_buffer,
+        0,
+        padded_messages_total_bytes,
+    );
 
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
@@ -374,18 +446,17 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     // Is a real case.
     let buffer_slice = buffers.readback_buffer.slice(0..result_size_bytes);
 
-    let map_done = Arc::new(Mutex::new(None));
-    let map_done_clone = map_done.clone();
-
+    let result_map_done = Arc::new(Mutex::new(None));
+    let result_map_done_clone = result_map_done.clone();
     buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-        *map_done_clone.lock().unwrap() = Some(result);
+        *result_map_done_clone.lock().unwrap() = Some(result);
     });
 
     // VERY IMPORTANT: Drive the mapping to completion.
     gpu.device.poll(wgpu::PollType::wait_indefinitely())?;
 
     // Check mapping result.
-    match map_done.lock().unwrap().take().unwrap() {
+    match result_map_done.lock().unwrap().take().unwrap() {
         Ok(()) => {}
         Err(e) => return Err(e.into()),
     }

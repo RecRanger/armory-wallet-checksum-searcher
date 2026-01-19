@@ -4,23 +4,64 @@ use once_cell::sync::OnceCell;
 use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt as _;
 
-fn pad_message(bytes: &[u8], size_words: u32) -> Vec<u32> {
-    let mut out = vec![0u32; size_words as usize];
+/// Calculate the length of the padded message.
+///
+/// Args:
+/// - `len_bytes`: Length of the input message (before any padding).
+///
+/// Returns the padded length of the message.
+fn calc_padded_message_length_bytes(len_bytes: u32) -> u32 {
+    let len_bits = len_bytes * 8;
 
-    let byte_len = bytes.len();
-    let dst_bytes = bytemuck::cast_slice_mut::<u32, u8>(&mut out);
+    // Number of bits to add so that:
+    // len + 1 + k + 64 ≡ 0 (mod 512)
+    let k = (512 - ((len_bits + 1 + 64) % 512)) % 512;
+    let total_bits = len_bits + 1 + k + 64;
 
-    dst_bytes[..byte_len].copy_from_slice(bytes);
+    debug_assert_eq!(total_bits % 512, 0);
 
-    out
+    let total_bytes_with_padding = total_bits / 8;
+
+    debug_assert_eq!(total_bytes_with_padding % 4, 0);
+    debug_assert_eq!(total_bytes_with_padding % 64, 0); // SHA-256 invariant
+
+    total_bytes_with_padding
 }
 
-fn get_message_sizes(bytes: &[u8]) -> [u32; 2] {
-    let len_bit = (bytes.len() * 8) as u32;
-    let k = 512 - (len_bit + 1 + 64) % 512;
-    let padding = 1 + k + 64;
-    let len_bit_padded = len_bit + padding;
-    [len_bit / 32, len_bit_padded / 32]
+/// Pad a message for SHA256 specifically (including appending its length).
+///
+/// Returns a Vec of length `padded_len_bytes`.
+fn pad_message(bytes: &[u8], padded_len_bytes: u32) -> Vec<u32> {
+    debug_assert!(
+        padded_len_bytes % 4 == 0,
+        "padded_len_bytes must be a multiple of 4"
+    );
+    debug_assert_eq!(padded_len_bytes % 64, 0);
+    debug_assert_eq!(
+        padded_len_bytes,
+        calc_padded_message_length_bytes(bytes.len() as u32)
+    );
+
+    let mut buf: Vec<u8> = vec![0u8; padded_len_bytes as usize];
+
+    // Copy message.
+    buf[..bytes.len()].copy_from_slice(bytes);
+
+    // Append the 0x80 bit.
+    buf[bytes.len()] = 0x80;
+
+    // Append message length in bits (big endian).
+    let bit_len = (bytes.len() as u64) * 8;
+    let len_pos = buf.len() - 8;
+    buf[len_pos..].copy_from_slice(&bit_len.to_be_bytes());
+
+    // Convert to u32 words.
+    // let output = bytemuck::cast_vec::<u8, u32>(buf);
+    let output: Vec<u32> = bytemuck::pod_collect_to_vec(&buf);
+
+    debug_assert!(output.len() as u32 == (padded_len_bytes / 4));
+
+    output
 }
 
 fn calc_num_workgroups(device: &wgpu::Device, num_messages: usize) -> u32 {
@@ -39,9 +80,6 @@ fn validate_messages(messages: &[&[u8]]) {
     for m in messages {
         if m.len() != len {
             panic!("Messages must have the same size");
-        }
-        if m.len() % 4 != 0 {
-            panic!("Message must be 32-bit aligned");
         }
     }
 }
@@ -110,12 +148,13 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
     let num_messages = messages.len();
     let num_workgroups = calc_num_workgroups(&gpu.device, num_messages);
 
-    let message_sizes = get_message_sizes(&messages[0]);
+    let message_length = messages[0].len();
+    let padded_message_length_bytes = calc_padded_message_length_bytes(message_length as u32);
 
     // ---- pack messages ----
     let mut message_array = Vec::<u32>::new();
     for msg in messages {
-        let padded = pad_message(msg, message_sizes[1]);
+        let padded = pad_message(msg, padded_message_length_bytes);
         message_array.extend_from_slice(&padded);
     }
 
@@ -135,6 +174,10 @@ pub async fn sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
             usage: wgpu::BufferUsages::STORAGE,
         });
 
+    // TODO: Maybe pass these in as two separate inputs.
+    // `message_sizes[0]` is the original message length in bytes.
+    // `message_sizes[1]` is the padded message length in bytes.
+    let message_sizes: [u32; 2] = [message_length as u32, padded_message_length_bytes];
     let message_sizes_buffer = gpu
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -297,8 +340,9 @@ pub fn run_sha256_gpu(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; 32]>> {
 mod tests {
     use super::*;
 
+    /// Same-length messages with `len(input) % 4 == 0` (aligned).
     #[test]
-    fn test_sha256_is_valid() {
+    fn test_sha256_is_valid_aligned() {
         let input_1 = b"Hello, wgsl\n";
         let expect_1: [u8; 32] = [
             254, 234, 146, 74, 232, 68, 234, 160, 191, 118, 232, 179, 211, 60, 233, 49, 144, 98,
@@ -321,10 +365,180 @@ mod tests {
         assert_eq!(hashes_again, vec![expect_1, expect_2]);
     }
 
+    /// Same-length messages with `len(input) % 4 != 0` (unaligned).
+    #[test]
+    fn test_sha256_is_valid_unaligned() {
+        let input_1 = b"Hello world.\n";
+        let expect_1: [u8; 32] = [
+            // 6472bf692aaf270d5f9dc40c5ecab8f826ecc92425c8bac4d1ea69bcbbddaea4
+            0x64, 0x72, 0xbf, 0x69, 0x2a, 0xaf, 0x27, 0x0d, 0x5f, 0x9d, 0xc4, 0x0c, 0x5e, 0xca,
+            0xb8, 0xf8, 0x26, 0xec, 0xc9, 0x24, 0x25, 0xc8, 0xba, 0xc4, 0xd1, 0xea, 0x69, 0xbc,
+            0xbb, 0xdd, 0xae, 0xa4,
+        ];
+
+        let input_2 = b"Hello, wgsl.\n";
+        let expect_2: [u8; 32] = [
+            193, 186, 14, 10, 195, 53, 238, 147, 57, 104, 6, 44, 255, 35, 108, 50, 166, 242, 19,
+            147, 88, 218, 128, 198, 86, 91, 208, 2, 254, 200, 188, 56,
+        ];
+
+        let hashes = run_sha256_gpu(&[&input_1[..], &input_2[..]]).unwrap();
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes, vec![expect_1, expect_2]);
+
+        // Test again to ensure repeated calls work right.
+        let hashes_again = run_sha256_gpu(&[&input_1[..], &input_2[..]]).unwrap();
+        assert_eq!(hashes_again.len(), 2);
+        assert_eq!(hashes_again, vec![expect_1, expect_2]);
+    }
+
     #[test]
     fn test_max_allowed_message_count_per_operation() {
         assert!(max_allowed_message_count_per_operation(64).unwrap() >= 256);
         assert!(max_allowed_message_count_per_operation(128).unwrap() >= 256);
         assert!(max_allowed_message_count_per_operation(4).unwrap() >= 256);
+    }
+}
+
+// MARK: Test Pad
+
+#[cfg(test)]
+mod padding_tests {
+    use super::*;
+
+    #[test]
+    fn test_calc_padded_message_length_bytes() {
+        assert_eq!(calc_padded_message_length_bytes(0), 64);
+        assert_eq!(calc_padded_message_length_bytes(20), 64);
+        assert_eq!(calc_padded_message_length_bytes(31), 64);
+        assert_eq!(calc_padded_message_length_bytes(32), 64);
+        assert_eq!(calc_padded_message_length_bytes(35), 64);
+        assert_eq!(calc_padded_message_length_bytes(50), 64);
+        assert_eq!(calc_padded_message_length_bytes(55), 64);
+        assert_eq!(calc_padded_message_length_bytes(56), 128);
+        assert_eq!(calc_padded_message_length_bytes(57), 128);
+        assert_eq!(calc_padded_message_length_bytes(64), 128);
+        assert_eq!(calc_padded_message_length_bytes(65), 128);
+    }
+
+    #[test]
+    fn pad_message_empty() {
+        let msg: &[u8] = b"";
+        let padded_len = calc_padded_message_length_bytes(0);
+        let padded = pad_message(msg, padded_len);
+
+        assert_eq!(padded.len() * 4, padded_len as usize);
+
+        // Inspect as raw bytes via u32 decomposition
+        let mut bytes = Vec::new();
+        for w in &padded {
+            bytes.extend_from_slice(&w.to_ne_bytes());
+        }
+
+        // First byte is 0x80
+        assert_eq!(bytes[0], 0x80);
+
+        // All bytes except last 8 are zero
+        for &b in &bytes[1..bytes.len() - 8] {
+            assert_eq!(b, 0);
+        }
+
+        // Length = 0 bits
+        assert_eq!(&bytes[bytes.len() - 8..], &[0u8; 8]);
+    }
+
+    #[test]
+    fn pad_message_unaligned() {
+        let msg = b"abc";
+        let padded_len = calc_padded_message_length_bytes(msg.len() as u32);
+        let padded = pad_message(msg, padded_len);
+
+        let mut bytes = Vec::new();
+        for w in &padded {
+            bytes.extend_from_slice(&w.to_ne_bytes());
+        }
+
+        // Message copied
+        assert_eq!(&bytes[..3], msg);
+
+        // Padding bit
+        assert_eq!(bytes[3], 0x80);
+
+        // Zero padding until length
+        for &b in &bytes[4..bytes.len() - 8] {
+            assert_eq!(b, 0);
+        }
+
+        // Length = 24 bits (big endian)
+        let bit_len = (msg.len() as u64) * 8;
+        assert_eq!(&bytes[bytes.len() - 8..], &bit_len.to_be_bytes());
+    }
+
+    /// Test 3: Boundary case - 55 bytes (fits in one block)
+    #[test]
+    fn pad_message_55_bytes() {
+        let msg = vec![0xAA; 55];
+        let padded_len = calc_padded_message_length_bytes(msg.len() as u32);
+        assert_eq!(padded_len, 64);
+
+        let padded = pad_message(&msg, padded_len);
+
+        let mut bytes = Vec::new();
+        for w in &padded {
+            bytes.extend_from_slice(&w.to_ne_bytes());
+        }
+
+        // Message copied
+        assert_eq!(&bytes[..55], &msg[..]);
+
+        // Padding byte
+        assert_eq!(bytes[55], 0x80);
+
+        // Length immediately follows
+        let bit_len = (msg.len() as u64) * 8;
+        assert_eq!(&bytes[56..64], &bit_len.to_be_bytes());
+    }
+
+    /// Boundary case (forces a second block).
+    #[test]
+    fn pad_message_56_bytes_two_blocks() {
+        let msg = vec![0xBB; 56];
+        let padded_len = calc_padded_message_length_bytes(msg.len() as u32);
+        assert_eq!(padded_len, 128);
+
+        let padded = pad_message(&msg, padded_len);
+
+        let mut bytes = Vec::new();
+        for w in &padded {
+            bytes.extend_from_slice(&w.to_ne_bytes());
+        }
+
+        // Message copied
+        assert_eq!(&bytes[..56], &msg[..]);
+
+        // Padding byte
+        assert_eq!(bytes[56], 0x80);
+
+        // Zero padding until length
+        for &b in &bytes[57..bytes.len() - 8] {
+            assert_eq!(b, 0);
+        }
+
+        // Length field
+        let bit_len = (msg.len() as u64) * 8;
+        assert_eq!(&bytes[bytes.len() - 8..], &bit_len.to_be_bytes());
+    }
+
+    // Test 5: Word packing sanity (no casts)
+    #[test]
+    fn pad_message_word_byte_order() {
+        let msg = b"abcd";
+        let padded_len = calc_padded_message_length_bytes(4);
+        let padded = pad_message(msg, padded_len);
+
+        let w = padded[0];
+        let b = w.to_ne_bytes();
+
+        assert_eq!(&b[..4], b"abcd");
     }
 }

@@ -42,7 +42,12 @@ override CONFIG_WORKGROUP_SIZE: u32 = 256u;
 
 @group(0) @binding(0) var<storage, read_write> messages: array<u32>;
 @group(0) @binding(1) var<storage, read> num_messages: u32;
+
+/// `message_sizes[0]` is the original message length in bytes.
+/// `message_sizes[1]` is the padded message length in bytes.
 @group(0) @binding(2) var<storage, read> message_sizes: array<u32>;
+
+/// `hashes` contains the output hashes of each message, tightly packed.
 @group(0) @binding(3) var<storage, read_write> hashes: array<u32>;
 
 @compute @workgroup_size(CONFIG_WORKGROUP_SIZE)
@@ -52,17 +57,11 @@ fn sha256(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (index >= num_messages) {
         return;
     }
-    let message_base_index = index * message_sizes[1];
+    let words_per_message = message_sizes[1] / 4u;
+    let message_base_index = index * words_per_message;
     let hash_base_index = index * (256u / 32u);
 
-    // == padding == //
-
-    messages[message_base_index + message_sizes[0]] = 0x00000080u;
-    for (var i = message_sizes[0] + 1; i < message_sizes[1] - 2; i++){
-        messages[message_base_index + i] = 0x00000000u;
-    }
-    messages[message_base_index + message_sizes[1] - 2] = 0;
-    messages[message_base_index + message_sizes[1] - 1] = swap_endianess32(message_sizes[0] * 32u);
+    // Note: Padding is now handled in Rust before passing data in.
 
     // == processing == //
 
@@ -86,7 +85,7 @@ fn sha256(@builtin(global_invocation_id) global_id: vec3<u32>) {
         0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u, 0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
     );
 
-    let num_chunks = (message_sizes[1] * 32u) / 512u;
+    let num_chunks = (message_sizes[1] * 8u) / 512u;
     for (var i = 0u; i < num_chunks; i++){
         let chunk_index = i * (512u/32u);
         var w = array<u32,64>();

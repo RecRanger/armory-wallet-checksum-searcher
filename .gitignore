@@ -1,3 +1,7 @@
+# Benchmarking files.
+*.svg
+perf.data*
+
 # Ignore files used for the program itself.
 *.log
 *.lz4

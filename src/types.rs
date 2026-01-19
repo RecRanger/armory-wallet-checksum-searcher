@@ -60,3 +60,9 @@ impl ChecksumPatternMatch {
         format!("{}+{}", self.chunk_len, self.checksum_len)
     }
 }
+
+#[derive(Clone, Copy, Debug)]
+pub enum ProcessorChoice {
+    Cpu,
+    Gpu,
+}

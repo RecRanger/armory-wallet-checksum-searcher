@@ -1,11 +1,16 @@
-mod processor;
+mod search;
+mod search_with_cpu;
+mod search_with_gpu;
+mod sha256_gpu;
 mod types;
 
-use processor::process_file;
+#[cfg(test)]
+mod test_general;
+
 use types::ChecksumPatternSpec;
 
 use std::fs::File;
-use std::io::{self, BufWriter, Write as _};
+use std::io::{BufWriter, Write as _};
 use std::time::SystemTime;
 
 use clap::Parser;
@@ -25,7 +30,7 @@ fn setup_logger(log_file: Option<PathBuf>) -> Result<(), fern::InitError> {
                 message
             ))
         })
-        .level(log::LevelFilter::Debug)
+        .level(log::LevelFilter::Info) // Min level.
         .chain(std::io::stdout());
 
     if let Some(log_file_path) = log_file {
@@ -71,6 +76,9 @@ struct Args {
     /// 38+4 -> An arbitrary-length searcher to act as a "control"
     #[clap(short, long = "pattern", value_parser)]
     patterns: Vec<ChecksumPatternSpec>,
+
+    #[clap(long = "gpu", value_parser)]
+    use_gpu: bool,
 }
 
 impl Args {
@@ -90,7 +98,7 @@ impl Args {
     }
 }
 
-fn main() -> io::Result<()> {
+fn main() -> anyhow::Result<()> {
     let args = Args::parse_with_defaults();
 
     // Register log file and/or normal stdout logger.
@@ -112,7 +120,15 @@ fn main() -> io::Result<()> {
         checksum_patterns.len(),
         checksum_patterns
     );
-    let pattern_matches = process_file(&args.input_file, &checksum_patterns)?;
+    let pattern_matches = search::process_file(
+        &args.input_file,
+        &checksum_patterns,
+        if args.use_gpu {
+            types::ProcessorChoice::Gpu
+        } else {
+            types::ProcessorChoice::Cpu
+        },
+    )?;
     info!("Found {} pattern matches.", pattern_matches.len());
 
     if let Some(ref output_ndjson_path) = args.output_ndjson_file {

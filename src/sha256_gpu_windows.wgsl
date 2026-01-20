@@ -10,23 +10,23 @@ override CONFIG_ENABLE_SHA256D: bool = true;
 // Bindings
 // ============================================================
 
-@group(0) @binding(0)
-var<storage, read> input_bytes: array<u32>;
-
-@group(0) @binding(1)
-var<storage, read_write> match_offsets: array<u32>;
-
-@group(0) @binding(2)
-var<storage, read_write> match_count: atomic<u32>;
-
 struct SearchConfig {
     input_len_bytes: u32, // Like 1_000_000.
     message_len_bytes: u32, // Like 20.
     compare_len_bytes: u32 // Like 4.
 };
 
+@group(0) @binding(0)
+var<storage, read> input_bytes: array<u32>;
+
+@group(0) @binding(1)
+var<uniform> search_config: SearchConfig;
+
+@group(0) @binding(2)
+var<storage, read_write> match_offsets: array<u32>;
+
 @group(0) @binding(3)
-var<uniform> config: SearchConfig;
+var<storage, read_write> match_count: atomic<u32>;
 
 // ============================================================
 // SHA-256 constants & helpers
@@ -198,7 +198,10 @@ fn sha256_compress(w: ptr<function, array<u32,64>>,
 fn sliding_sha256d(@builtin(global_invocation_id) gid: vec3<u32>) {
     let offset = gid.x;
 
-    if ((offset + config.message_len_bytes + config.compare_len_bytes) > config.input_len_bytes) {
+    if (
+        (offset + search_config.message_len_bytes + search_config.compare_len_bytes)
+        > search_config.input_len_bytes
+    ) {
         return;
     }
 
@@ -207,11 +210,11 @@ fn sliding_sha256d(@builtin(global_invocation_id) gid: vec3<u32>) {
         0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
     );
 
-    let blocks = padded_len_bytes(config.message_len_bytes) / 64u;
+    let blocks = padded_len_bytes(search_config.message_len_bytes) / 64u;
 
     for (var b = 0u; b < blocks; b++) {
         var w = array<u32,64>();
-        build_block(offset, b, config.message_len_bytes, &w);
+        build_block(offset, b, search_config.message_len_bytes, &w);
         sha256_compress(&w, &h);
     }
 
@@ -237,12 +240,12 @@ fn sliding_sha256d(@builtin(global_invocation_id) gid: vec3<u32>) {
     let hash_word = swap_endianess32(h[0]);
 
     var cmp = 0u;
-    for (var i = 0u; i < config.compare_len_bytes; i++) {
-        cmp |= load_byte(offset, config.message_len_bytes + i)
-            << ((config.compare_len_bytes - 1u - i) * 8u);
+    for (var i = 0u; i < search_config.compare_len_bytes; i++) {
+        cmp |= load_byte(offset, search_config.message_len_bytes + i)
+            << ((search_config.compare_len_bytes - 1u - i) * 8u);
     }
 
-    let mask = 0xffffffffu << ((4u - config.compare_len_bytes) * 8u);
+    let mask = 0xffffffffu << ((4u - search_config.compare_len_bytes) * 8u);
 
     if ((hash_word & mask) == cmp) {
         let idx = atomicAdd(&match_count, 1u);

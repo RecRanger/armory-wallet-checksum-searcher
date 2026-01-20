@@ -45,12 +45,12 @@ struct GpuBuffers {
     input_buffer: wgpu::Buffer,
     input_capacity: u64,
 
-    match_offsets: wgpu::Buffer,
+    search_config_buffer: wgpu::Buffer,
+
+    match_offsets_buffer: wgpu::Buffer,
     match_offsets_capacity: u64,
 
-    match_count: wgpu::Buffer,
-
-    config_buffer: wgpu::Buffer,
+    match_count_buffer: wgpu::Buffer,
 
     readback_offsets: wgpu::Buffer,
     readback_count: wgpu::Buffer,
@@ -82,12 +82,12 @@ impl GPU {
             entries: &[
                 // input_bytes
                 layout_entry(0, true),
+                // search_config
+                layout_entry_uniform(1),
                 // match_offsets
-                layout_entry(1, false),
-                // match_count
                 layout_entry(2, false),
-                // config
-                layout_entry_uniform(3),
+                // match_count
+                layout_entry(3, false),
             ],
         });
 
@@ -204,22 +204,29 @@ pub fn search_sha256_gpu_windows(
     let wg_size = gpu.device.limits().max_compute_workgroup_size_x;
     let num_workgroups = (total_offsets + wg_size - 1) / wg_size;
 
-    // Pack input bytes into u32 words (big endian).
-    let mut packed = vec![0u32; (input_data.len() + 3) / 4];
-    for (i, b) in input_data.iter().enumerate() {
-        packed[i / 4] |= (*b as u32) << (24 - 8 * (i & 3));
+    // Pack input bytes into u32 words (big endian). Note: Does not do the SHA256 packing here.
+    let mut input_data_packed_u32 = vec![0u32; (input_data.len() + 3) / 4];
+    for (byte_idx, byte_val) in input_data.iter().enumerate() {
+        input_data_packed_u32[byte_idx / 4] |= (*byte_val as u32) << (24 - 8 * (byte_idx & 3));
     }
 
     let mut guard = gpu.buffers.lock().unwrap();
 
     let buffers = guard.get_or_insert_with(|| {
-        let input_buffer = gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("input"),
-                contents: bytemuck::cast_slice(&packed),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            });
+        let input_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("input"),
+            size: (input_data_packed_u32.len() * 4) as u64,
+            // TODO: Maybe use MAP_WRITE here, and then pack directly into the buffer once it's mapped.
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let search_config_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("search_config"),
+            size: std::mem::size_of::<SearchConfig>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let match_offsets = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("match_offsets"),
@@ -236,20 +243,6 @@ pub fn search_sha256_gpu_windows(
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             });
 
-        let config = SearchConfig {
-            input_len_bytes: input_data.len() as u32,
-            message_len_bytes,
-            compare_len_bytes,
-        };
-
-        let config_buffer = gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("config"),
-                contents: bytemuck::bytes_of(&config),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-
         let readback_offsets = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback_offsets"),
             size: total_offsets as u64 * 4,
@@ -259,7 +252,7 @@ pub fn search_sha256_gpu_windows(
 
         let readback_count = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback_count"),
-            size: 4,
+            size: 4, // Single integer.
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -268,25 +261,44 @@ pub fn search_sha256_gpu_windows(
             layout: &gpu.bind_group_layout,
             entries: &[
                 entry(0, &input_buffer),
-                entry(1, &match_offsets),
-                entry(2, &match_count),
-                entry(3, &config_buffer),
+                entry(1, &search_config_buffer),
+                entry(2, &match_offsets),
+                entry(3, &match_count),
             ],
             label: Some("sliding-bind-group"),
         });
 
         GpuBuffers {
             input_buffer,
-            input_capacity: packed.len() as u64 * 4,
-            match_offsets,
+            input_capacity: input_data_packed_u32.len() as u64 * 4,
+            search_config_buffer,
+            match_offsets_buffer: match_offsets,
             match_offsets_capacity: total_offsets as u64 * 4,
-            match_count,
-            config_buffer,
+            match_count_buffer: match_count,
             readback_offsets,
             readback_count,
             bind_group,
         }
     });
+
+    let search_config_val = SearchConfig {
+        input_len_bytes: input_data.len() as u32,
+        message_len_bytes,
+        compare_len_bytes,
+    };
+
+    // Write the inputs.
+    gpu.queue.write_buffer(
+        &buffers.input_buffer,
+        0,
+        bytemuck::cast_slice(&input_data_packed_u32),
+    );
+
+    gpu.queue.write_buffer(
+        &buffers.search_config_buffer,
+        0,
+        bytemuck::bytes_of(&search_config_val),
+    );
 
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
 
@@ -298,13 +310,19 @@ pub fn search_sha256_gpu_windows(
     }
 
     encoder.copy_buffer_to_buffer(
-        &buffers.match_offsets,
+        &buffers.match_offsets_buffer,
         0,
         &buffers.readback_offsets,
         0,
         buffers.match_offsets_capacity,
     );
-    encoder.copy_buffer_to_buffer(&buffers.match_count, 0, &buffers.readback_count, 0, 4);
+    encoder.copy_buffer_to_buffer(
+        &buffers.match_count_buffer,
+        0,
+        &buffers.readback_count,
+        0,
+        4,
+    );
 
     gpu.queue.submit(Some(encoder.finish()));
 

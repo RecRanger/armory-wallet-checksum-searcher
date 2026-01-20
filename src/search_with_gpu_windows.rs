@@ -1,5 +1,5 @@
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use log::info;
+use log::{debug, info};
 
 use crate::sha256_gpu_windows::{ComputePipelineVersionWindows, search_sha256_gpu_windows};
 use crate::types::{ChecksumPatternMatch, ChecksumPatternSpec};
@@ -30,6 +30,8 @@ pub fn search_for_checksums_gpu_windows(
 
     let mut matches: Vec<ChecksumPatternMatch> = Vec::new();
 
+    // FIXME: Need to chunk over data!
+
     // We iterate patterns outermost to keep GPU config uniform per dispatch.
     for (pattern_idx, pattern) in checksum_patterns.iter().enumerate() {
         let message_len = pattern.chunk_len as u32;
@@ -54,6 +56,11 @@ pub fn search_for_checksums_gpu_windows(
             compare_len,
             ComputePipelineVersionWindows::Sha256DoubleWindows,
         )?;
+        debug!(
+            "Found {} matches for pattern {}",
+            matching_offsets.len(),
+            pattern_idx
+        );
 
         // Materialize matches (rare path).
         for &chunk_start_idx in &matching_offsets {

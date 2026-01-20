@@ -64,5 +64,6 @@ impl ChecksumPatternMatch {
 #[derive(Clone, Copy, Debug)]
 pub enum ProcessorChoice {
     Cpu,
-    Gpu,
+    GpuSlowMessages,
+    GpuWindows,
 }

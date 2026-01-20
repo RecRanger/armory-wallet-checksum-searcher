@@ -10,6 +10,7 @@ use log::info;
 use crate::{
     search_with_cpu::search_for_checksums_cpu,
     search_with_gpu::search_for_checksums_gpu,
+    search_with_gpu_windows::search_for_checksums_gpu_windows,
     types::{ChecksumPatternMatch, ChecksumPatternSpec, ProcessorChoice},
 };
 
@@ -21,9 +22,7 @@ pub fn search_for_checksums(
     match processor_choice {
         ProcessorChoice::Cpu => Ok(search_for_checksums_cpu(data, checksum_patterns)),
         ProcessorChoice::GpuSlowMessages => search_for_checksums_gpu(data, checksum_patterns),
-        ProcessorChoice::GpuWindows => {
-            unimplemented!("GPU Windows processing is not yet implemented")
-        }
+        ProcessorChoice::GpuWindows => search_for_checksums_gpu_windows(data, checksum_patterns),
     }
 }
 

@@ -619,18 +619,18 @@ fn calc_allowed_message_count_per_operation(
     device_max_wg_per_dimension: u32,
     device_max_buffer_sizes: &[u64],
 ) -> usize {
-    use std::cmp::{max, min};
+    use std::cmp::min;
 
     // Based on logic/docs in `calc_num_workgroups()`.
     let max_from_workgroups = (device_max_wg_per_dimension * device_max_wg_size_x) as usize;
 
     // Based on errors about max buffer size.
-    let each_message_length_64_bits = max(each_message_length, 64); // Maybe need padding logic.
-    let device_max_buffer_size = *device_max_buffer_sizes
+    let each_message_length_padded = calc_padded_message_length_bytes(each_message_length as u32);
+    let device_max_buffer_size: u64 = *device_max_buffer_sizes
         .iter()
         .min() // Pick the tighter option.
         .unwrap(); // Unwrap is safe because the array should never be empty.
-    let max_from_buffer = (device_max_buffer_size / each_message_length_64_bits as u64) as usize;
+    let max_from_buffer = (device_max_buffer_size / each_message_length_padded as u64) as usize;
 
     // Combine. Select the lower value for safety.
     let max_overall = min(max_from_workgroups, max_from_buffer);
@@ -673,7 +673,10 @@ pub fn run_sha256d_gpu<const N: usize>(messages: &[&[u8]]) -> anyhow::Result<Vec
 
 #[cfg(test)]
 mod tests {
-    use crate::search_with_cpu::sha256;
+    use crate::{
+        search_with_cpu::{sha256, sha256d},
+        test_general::get_test_config,
+    };
 
     use super::*;
 
@@ -917,6 +920,46 @@ mod tests {
     }
 
     #[test]
+    fn test_sha256d_max_allowed_message_with_various_lengths() {
+        if !get_test_config().enable_slow_tests {
+            return;
+        }
+
+        // Increasing, then make sure to decrease size too to test under-utilized buffer case.
+        let sizes = [0_usize, 1, 16, 55, 56, 65, 32];
+
+        for input_len in sizes {
+            let message_count: usize = max_allowed_message_count_per_operation(input_len).unwrap();
+            // let message_count: usize = 10;
+            println!(
+                "Testing input_len={}, with message_count={}",
+                input_len, message_count
+            );
+
+            let mut messages: Vec<Vec<u8>> = Vec::with_capacity(message_count);
+            let mut expected: Vec<[u8; 32]> = Vec::with_capacity(message_count);
+            for _message_num in 0..message_count {
+                let input_data = generate_random_array(input_len, input_len as u64);
+
+                expected.push(sha256d(&input_data)); // Note: This part takes longer than the GPU operation.
+                messages.push(input_data);
+            }
+
+            let message_slices: Vec<&[u8]> = messages.iter().map(|v| v.as_slice()).collect();
+            let hashes: Vec<[u8; 32]> = run_sha256d_gpu(&message_slices).unwrap();
+            assert_eq!(hashes.len(), message_count);
+            std::hint::black_box(&hashes);
+
+            assert!(
+                hashes == expected, // Don't use assert_eq, otherwise the dump on fail is huge.
+                "Failure: hashes != expected at input_len={}, message_count={}",
+                input_len,
+                message_count
+            );
+        }
+    }
+
+    #[test]
     fn test_single_hash_increasing_message_count() {
         let mut seed: u64 = 42;
         for (message_count_loop_num, message_count) in [1, 20, 50, 25, 1].iter().enumerate() {
@@ -943,6 +986,21 @@ mod tests {
                 message_count, message_count_loop_num
             );
         }
+    }
+
+    #[test]
+    fn test_calc_allowed_message_count_per_operation() {
+        // Upper boundary case of single-block.
+        assert_eq!(
+            calc_allowed_message_count_per_operation(55, 256, 65_535, &[268435456, 134217728]),
+            2_097_152
+        );
+
+        // Lower boundary case of two blocks. Caused issues.
+        assert_eq!(
+            calc_allowed_message_count_per_operation(56, 256, 65_535, &[268435456, 134217728]),
+            1_048_576
+        );
     }
 }
 
@@ -1053,7 +1111,7 @@ mod padding_tests {
         assert_eq!(&bytes[56..64], &bit_len.to_be_bytes());
     }
 
-    /// Boundary case (forces a second block).
+    /// Boundary case (56 bytes forces a second block).
     #[test]
     fn pad_message_into_56_bytes_two_blocks() {
         let msg = vec![0xBB; 56];

@@ -2,7 +2,10 @@ use std::sync::OnceLock;
 
 #[derive(Debug)]
 pub struct TestConfig {
+    /// Set with environment variable `TEST_MAX_DATA_SIZE_MIB=128`, for example.
     pub max_data_size_mebibytes: usize,
+
+    /// Set with environment variable `TEST_ENABLE_SLOW_TESTS=true`.
     pub enable_slow_tests: bool,
 }
 

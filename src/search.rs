@@ -536,6 +536,88 @@ mod tests {
             },
         );
     }
+
+    /// Best nominal test case for the entire project.
+    #[rstest]
+    #[case(ProcessorChoice::Cpu)]
+    #[case(ProcessorChoice::Gpu)]
+    fn test_with_cases_injected_to_random_data(#[case] processor: ProcessorChoice) {
+        // MARK: Main test.
+        // Test case found by trial-and-error with find_random_seeds_with_matches()
+        let mut test_data = generate_random_array(1024 * 1024, 16); // 1 MiB random data.
+
+        // Inject success case (size 20+4).
+        let valid_chunk = create_valid_chunk(&test_data[50_000..50_000 + 20], 4);
+        assert_eq!(valid_chunk.len(), 20 + 4);
+        test_data[50_000..50_000 + 20 + 4].copy_from_slice(&valid_chunk);
+
+        // Inject success case (size 32+4).
+        let valid_chunk = create_valid_chunk(&test_data[123_000..123_000 + 32], 4);
+        assert_eq!(valid_chunk.len(), 32 + 4);
+        test_data[123_000..123_000 + 32 + 4].copy_from_slice(&valid_chunk);
+
+        // Inject success case (size 65+4).
+        let valid_chunk = create_valid_chunk(&test_data[275_000..275_000 + 65], 4);
+        assert_eq!(valid_chunk.len(), 65 + 4);
+        test_data[275_000..275_000 + 65 + 4].copy_from_slice(&valid_chunk);
+
+        let patterns = vec![
+            ChecksumPatternSpec::from_str("16+4").unwrap(),
+            ChecksumPatternSpec::from_str("20+4").unwrap(),
+            ChecksumPatternSpec::from_str("32+4").unwrap(),
+            ChecksumPatternSpec::from_str("65+4").unwrap(),
+        ];
+        let matches = search_for_checksums(&test_data, &patterns, processor).unwrap();
+
+        assert_eq!(
+            matches.len(),
+            3,
+            "Expected to find all 3 matches, but found {} matches: {:?}",
+            matches.len(),
+            matches
+        );
+        assert_eq!(
+            matches[0],
+            ChecksumPatternMatch {
+                chunk_len: 20,
+                checksum_len: 4,
+                chunk_start_offset: 50_000,
+                chunk_data: vec![
+                    247, 200, 127, 139, 154, 10, 7, 81, 3, 153, 169, 233, 226, 45, 67, 62, 189, 35,
+                    231, 98
+                ],
+                checksum_data: vec![102, 130, 142, 232]
+            }
+        );
+        assert_eq!(
+            matches[1],
+            ChecksumPatternMatch {
+                chunk_len: 32,
+                checksum_len: 4,
+                chunk_start_offset: 123_000,
+                chunk_data: vec![
+                    221, 141, 89, 162, 25, 90, 166, 177, 219, 51, 241, 67, 189, 29, 235, 212, 216,
+                    187, 1, 17, 38, 107, 29, 134, 76, 21, 195, 151, 54, 244, 248, 64
+                ],
+                checksum_data: vec![132, 168, 100, 175]
+            },
+        );
+        assert_eq!(
+            matches[2],
+            ChecksumPatternMatch {
+                chunk_len: 65,
+                checksum_len: 4,
+                chunk_start_offset: 275_000,
+                chunk_data: vec![
+                    32, 200, 154, 236, 89, 174, 27, 108, 127, 53, 225, 139, 190, 91, 36, 18, 32,
+                    244, 119, 67, 234, 209, 39, 106, 214, 240, 53, 148, 193, 206, 196, 172, 166,
+                    12, 36, 181, 29, 126, 50, 138, 245, 77, 3, 45, 160, 219, 158, 98, 20, 146, 243,
+                    171, 150, 149, 118, 200, 59, 219, 173, 106, 41, 133, 160, 157, 137
+                ],
+                checksum_data: vec![139, 116, 95, 212]
+            },
+        );
+    }
 }
 
 // MARK: Adv. Tests

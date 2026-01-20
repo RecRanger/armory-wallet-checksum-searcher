@@ -29,21 +29,23 @@ const fn calc_padded_message_length_bytes(len_bytes: u32) -> u32 {
 /// Writes the padded message into `output_words`.
 /// The `output_words` slice should be `padded_len_bytes / 4` elements long.
 /// Supports non-zero-filled data.
-fn pad_message_into(message_bytes: &[u8], output_words: &mut [u32]) {
+fn pad_message_into<M: AsRef<[u8]>>(message_bytes: M, output_words: &mut [u32]) {
     let output_bytes = bytemuck::cast_slice_mut::<u32, u8>(output_words);
 
+    let message_bytes_len: usize = message_bytes.as_ref().len();
+
     // Copy message.
-    output_bytes[..message_bytes.len()].copy_from_slice(message_bytes);
+    output_bytes[..message_bytes_len].copy_from_slice(message_bytes.as_ref());
 
     // Append the 0x80 byte.
-    output_bytes[message_bytes.len()] = 0x80;
+    output_bytes[message_bytes_len] = 0x80;
 
     // Zero only the required padding bytes (between message and the final length u64).
     let len_pos = output_bytes.len() - 8;
-    output_bytes[(message_bytes.len() + 1)..len_pos].fill(0);
+    output_bytes[(message_bytes_len + 1)..len_pos].fill(0);
 
     // Append message length in bits (big endian, 64 bit value, u64).
-    let bit_len = (message_bytes.len() as u64) * 8;
+    let bit_len = (message_bytes_len as u64) * 8;
     output_bytes[len_pos..].copy_from_slice(&bit_len.to_be_bytes());
 }
 
@@ -264,8 +266,8 @@ fn get_gpu() -> anyhow::Result<&'static GPU> {
     GPU_INSTANCE.get_or_try_init(|| pollster::block_on(GPU::init()))
 }
 
-pub async fn sha256_gpu<const N: usize>(
-    messages: &[&[u8]],
+pub async fn sha256_gpu<const N: usize, M: AsRef<[u8]>>(
+    messages: &[M],
     compute_pipeline_version: ComputePipelineVersion,
 ) -> anyhow::Result<Vec<[u8; N]>>
 where
@@ -278,7 +280,7 @@ where
     let num_messages: u32 = messages.len() as u32;
     let num_workgroups = calc_num_workgroups(&gpu.device, num_messages);
 
-    let message_length: u32 = messages[0].len() as u32;
+    let message_length: u32 = messages[0].as_ref().len() as u32;
     let padded_message_length_bytes = calc_padded_message_length_bytes(message_length);
     let padded_message_length_words: usize = (padded_message_length_bytes as usize) / 4;
 
@@ -294,11 +296,11 @@ where
     }
     for (message_index, message_bytes) in messages.iter().enumerate() {
         // Validate that all messages are the same length! Critical requirement.
-        if message_bytes.len() != message_length as usize {
+        if message_bytes.as_ref().len() != message_length as usize {
             panic!(
                 "All messages must have the same length. Message #{}'s length is {} but expected {}.",
                 message_index,
-                message_bytes.len(),
+                message_bytes.as_ref().len(),
                 message_length
             );
         }
@@ -660,13 +662,20 @@ pub fn max_allowed_message_count_per_operation(
 }
 
 #[allow(dead_code)]
-pub fn run_sha256_gpu<const N: usize>(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; N]>> {
-    pollster::block_on(sha256_gpu::<N>(messages, ComputePipelineVersion::Sha256))
+pub fn run_sha256_gpu<const N: usize, M: AsRef<[u8]>>(
+    messages: &[M],
+) -> anyhow::Result<Vec<[u8; N]>> {
+    pollster::block_on(sha256_gpu::<N, M>(messages, ComputePipelineVersion::Sha256))
 }
 
 #[allow(dead_code)]
-pub fn run_sha256d_gpu<const N: usize>(messages: &[&[u8]]) -> anyhow::Result<Vec<[u8; N]>> {
-    pollster::block_on(sha256_gpu::<N>(messages, ComputePipelineVersion::Sha256d))
+pub fn run_sha256d_gpu<const N: usize, M: AsRef<[u8]>>(
+    messages: &[M],
+) -> anyhow::Result<Vec<[u8; N]>> {
+    pollster::block_on(sha256_gpu::<N, M>(
+        messages,
+        ComputePipelineVersion::Sha256d,
+    ))
 }
 
 // MARK: Tests
@@ -695,12 +704,12 @@ mod tests {
             178, 111, 140, 105, 225, 232, 62, 162, 175, 199, 196, 143,
         ];
 
-        let hashes = run_sha256_gpu(&[&input_1[..], &input_2[..]]).unwrap();
+        let hashes = run_sha256_gpu(&[input_1, input_2]).unwrap();
         assert_eq!(hashes.len(), 2);
         assert_eq!(hashes, vec![expect_1, expect_2]);
 
         // Test again to ensure repeated calls work right.
-        let hashes_again = run_sha256_gpu(&[&input_1[..], &input_2[..]]).unwrap();
+        let hashes_again = run_sha256_gpu(&[input_1, input_2]).unwrap();
         assert_eq!(hashes_again.len(), 2);
         assert_eq!(hashes_again, vec![expect_1, expect_2]);
     }
@@ -713,12 +722,12 @@ mod tests {
         let input_2 = b"Hello world\n";
         let expect_2: [u8; 4] = [24, 148, 161, 156];
 
-        let hashes = run_sha256_gpu::<4>(&[&input_1[..], &input_2[..]]).unwrap();
+        let hashes: Vec<[u8; 4]> = run_sha256_gpu(&[input_1, input_2]).unwrap();
         assert_eq!(hashes.len(), 2);
         assert_eq!(hashes, vec![expect_1, expect_2]);
 
         // Test again to ensure repeated calls work right.
-        let hashes_again = run_sha256_gpu::<4>(&[&input_1[..], &input_2[..]]).unwrap();
+        let hashes_again: Vec<[u8; 4]> = run_sha256_gpu(&[input_1, input_2]).unwrap();
         assert_eq!(hashes_again.len(), 2);
         assert_eq!(hashes_again, vec![expect_1, expect_2]);
     }
@@ -731,7 +740,7 @@ mod tests {
         let input_2 = b"Hello world\n";
         let expect_2: [u8; 12] = [24, 148, 161, 156, 133, 186, 21, 58, 203, 247, 67, 172];
 
-        let hashes = run_sha256_gpu::<12>(&[&input_1[..], &input_2[..]]).unwrap();
+        let hashes: Vec<[u8; 12]> = run_sha256_gpu(&[input_1, input_2]).unwrap();
         assert_eq!(hashes.len(), 2);
         assert_eq!(hashes, vec![expect_1, expect_2]);
     }
@@ -753,12 +762,12 @@ mod tests {
             147, 88, 218, 128, 198, 86, 91, 208, 2, 254, 200, 188, 56,
         ];
 
-        let hashes = run_sha256_gpu(&[&input_1[..], &input_2[..]]).unwrap();
+        let hashes = run_sha256_gpu(&[input_1, input_2]).unwrap();
         assert_eq!(hashes.len(), 2);
         assert_eq!(hashes, vec![expect_1, expect_2]);
 
         // Test again to ensure repeated calls work right.
-        let hashes_again = run_sha256_gpu(&[&input_1[..], &input_2[..]]).unwrap();
+        let hashes_again = run_sha256_gpu(&[input_1, input_2]).unwrap();
         assert_eq!(hashes_again.len(), 2);
         assert_eq!(hashes_again, vec![expect_1, expect_2]);
     }
@@ -773,7 +782,7 @@ mod tests {
         ];
         assert_eq!(sha256(input_1), expect_1);
 
-        let hashes = run_sha256_gpu(&[&input_1[..], &input_1[..]]).unwrap();
+        let hashes = run_sha256_gpu(&[input_1, input_1]).unwrap();
         assert_eq!(hashes.len(), 2);
         assert_eq!(hashes, vec![expect_1, expect_1]);
     }
@@ -787,7 +796,7 @@ mod tests {
             156, 231, 56, 159, 25, 217, 66, 189, 1, 131, 11, 167, 119, 180,
         ];
 
-        let hashes = run_sha256_gpu(&[&input_1[..]]).unwrap();
+        let hashes = run_sha256_gpu(&[input_1]).unwrap();
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes, vec![expect_1]);
     }
@@ -800,7 +809,7 @@ mod tests {
             140, 0, 188, 98, 255, 175, 205, 243, 220, 243, 210, 168,
         ];
 
-        let hashes = run_sha256_gpu(&[&input_1[..]]).unwrap();
+        let hashes = run_sha256_gpu(&[input_1]).unwrap();
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes, vec![expect_1]);
     }
@@ -815,7 +824,7 @@ mod tests {
             0xbb, 0xdd, 0xae, 0xa4,
         ];
 
-        let hashes_1 = run_sha256_gpu(&[&input_1[..]]).unwrap();
+        let hashes_1 = run_sha256_gpu(&[input_1]).unwrap();
         assert_eq!(hashes_1.len(), 1);
         assert_eq!(hashes_1, vec![expect_1]);
 
@@ -945,8 +954,7 @@ mod tests {
                 messages.push(input_data);
             }
 
-            let message_slices: Vec<&[u8]> = messages.iter().map(|v| v.as_slice()).collect();
-            let hashes: Vec<[u8; 32]> = run_sha256d_gpu(&message_slices).unwrap();
+            let hashes: Vec<[u8; 32]> = run_sha256d_gpu(&messages).unwrap();
             assert_eq!(hashes.len(), message_count);
             std::hint::black_box(&hashes);
 
@@ -972,12 +980,7 @@ mod tests {
 
             let expected: Vec<[u8; 32]> = input_data.iter().map(|x| sha256(x)).collect();
 
-            let input_slices: Vec<&[u8]> = input_data
-                .iter()
-                .map(|message_bytes| message_bytes.as_slice())
-                .collect();
-
-            let hashes: Vec<[u8; 32]> = run_sha256_gpu(&input_slices).unwrap();
+            let hashes: Vec<[u8; 32]> = run_sha256_gpu(&input_data).unwrap();
 
             assert_eq!(hashes.len(), *message_count);
             assert_eq!(

@@ -32,6 +32,11 @@ pub fn search_for_checksums_gpu_windows(
 
     // Look up the GPU's max buffer size.
     let max_input_len_bytes = get_max_input_len_bytes()?;
+    info!(
+        "Sending up to {} bytes ({:.3} MiB) to the GPU at once.",
+        max_input_len_bytes,
+        max_input_len_bytes as f64 / (1024.0 * 1024.0)
+    );
 
     let mut matches: Vec<ChecksumPatternMatch> = Vec::new();
 

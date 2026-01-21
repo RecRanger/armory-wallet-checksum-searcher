@@ -233,20 +233,13 @@ fn sliding_sha256d(@builtin(global_invocation_id) gid: vec3<u32>) {
         var w = array<u32,64>();
         build_block(offset, b, search_config.message_len_bytes, &w);
         sha256_compress(&w, &h);
-
-        // // Debug Hack: Dump packed block `w` into output buffer.
-        // if (offset == 50000) {
-        //     for (var i = 0u; i < 64u; i++) {
-        //         match_offsets[i] = w[i];
-        //     }
-        // }
     }
 
     if (CONFIG_ENABLE_SHA256D) {
         var w2 = array<u32,64>();
-        for (var i = 0u; i < 64u; i++) { w2[i] = 0u; }
         for (var i = 0u; i < 8u; i++) { w2[i] = h[i]; }
         w2[8] = 0x80000000u;
+        for (var i = 9u; i < 64u; i++) { w2[i] = 0u; }
         w2[15] = 256u;
 
         for (var i = 16u; i < 64u; i++) {
@@ -261,11 +254,23 @@ fn sliding_sha256d(@builtin(global_invocation_id) gid: vec3<u32>) {
         sha256_compress(&w2, &h);
     }
 
-    // Compare the result. Assume compare_len_bytes == 4 (forced).
-    let input_word_be =
-        input_bytes[(offset + search_config.message_len_bytes) >> 2u];
-    let hash_word_be = h[0];
-    if (input_word_be == hash_word_be) {
+    // Compare prefix of hash against input bytes (little-endian).
+    var mismatch = false;
+    for (var i = 0u; i < search_config.compare_len_bytes; i++) {
+        // Input byte: immediately after the message.
+        let input_b = load_byte(offset, search_config.message_len_bytes + i);
+
+        // Hash byte: little-endian byte order.
+        let hash_word = swap_endianess32(h[i >> 2u]);
+        let hash_shift = (i & 3u) * 8u;
+        let hash_b = (hash_word >> hash_shift) & 0xffu;
+
+        if (input_b != hash_b) {
+            mismatch = true;
+            break;
+        }
+    }
+    if (!mismatch) {
         // This part (match is found) occurs very rarely (so it's fine to use slow atomic operations).
         let idx = atomicAdd(&match_count, 1u);
         if (idx < arrayLength(&match_offsets)) {
@@ -274,18 +279,16 @@ fn sliding_sha256d(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // DEBUG: Write out the hash.
-    // if (offset == 50000) {
-    //     let idx = atomicAdd(&match_count, 32); // Meaningless.
-
+    // if (offset == 275000) {
     //     for (var i = 0u; i < 32u; i += 4u) {
     //         let w = h[i / 4u]; // BE word value
     //         // let w = input_bytes[(offset + i) >> 2u];
 
     //         // Write LE bytes
-    //         match_offsets[i + 0u] = (w >> 0u)  & 0xffu;
-    //         match_offsets[i + 1u] = (w >> 8u)  & 0xffu;
-    //         match_offsets[i + 2u] = (w >> 16u) & 0xffu;
-    //         match_offsets[i + 3u] = (w >> 24u) & 0xffu;
+    //         match_offsets[i + 3u] = (w >> 0u)  & 0xffu;
+    //         match_offsets[i + 2u] = (w >> 8u)  & 0xffu;
+    //         match_offsets[i + 1u] = (w >> 16u) & 0xffu;
+    //         match_offsets[i + 0u] = (w >> 24u) & 0xffu;
     //     }
     // }
 }

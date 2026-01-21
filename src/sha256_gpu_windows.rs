@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::{cmp::min, sync::Mutex};
 
 use anyhow::Result;
 use enum_map::{Enum, EnumMap, enum_map};
@@ -130,6 +130,16 @@ fn gpu() -> Result<&'static GPU> {
 // Helpers
 // ============================================================
 
+// limits().max_compute_workgroups_per_dimension = 65_536
+
+fn get_match_offsets_buffer_size(total_offsets: u32) -> anyhow::Result<u64> {
+    // One u32 per potential output offset. Could be much lower.
+    Ok(min(
+        (total_offsets as u64) * 4,
+        gpu()?.device.limits().max_storage_buffer_binding_size as u64,
+    ))
+}
+
 fn layout_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -194,7 +204,7 @@ pub fn search_sha256_gpu_windows(
     message_len_bytes: u32,
     compare_len_bytes: u32,
     algo: ComputePipelineVersionWindows,
-) -> Result<Vec<u32>> {
+) -> anyhow::Result<Vec<u32>> {
     debug_assert!(message_len_bytes > 0);
     debug_assert!(compare_len_bytes <= 32);
 
@@ -209,6 +219,7 @@ pub fn search_sha256_gpu_windows(
     let total_offsets = input_data.len() as u32 - message_len_bytes - compare_len_bytes + 1;
     let wg_size = gpu.device.limits().max_compute_workgroup_size_x;
     let num_workgroups = (total_offsets + wg_size - 1) / wg_size;
+    let match_offsets_buffer_size = get_match_offsets_buffer_size(total_offsets)?;
 
     // Pack input bytes into u32 words (big endian). Note: Does not do the SHA256 packing here.
     let mut input_data_packed_u32 = vec![0u32; (input_data.len() + 3) / 4];
@@ -236,7 +247,8 @@ pub fn search_sha256_gpu_windows(
 
         let match_offsets = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("match_offsets"),
-            size: total_offsets as u64 * 4, // One u32 per potential output offset. Could be much lower.
+            // One u32 per potential output offset. Could be much lower.
+            size: match_offsets_buffer_size,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -252,7 +264,7 @@ pub fn search_sha256_gpu_windows(
 
         let readback_offsets = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback_offsets"),
-            size: total_offsets as u64 * 4,
+            size: match_offsets_buffer_size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -280,7 +292,7 @@ pub fn search_sha256_gpu_windows(
             input_capacity: input_data_packed_u32.len() as u64 * 4,
             search_config_buffer,
             match_offsets_buffer: match_offsets,
-            match_offsets_capacity: total_offsets as u64 * 4,
+            match_offsets_capacity: match_offsets_buffer_size,
             match_count_buffer: match_count,
             readback_offsets,
             readback_count,
@@ -321,6 +333,7 @@ pub fn search_sha256_gpu_windows(
     }
 
     encoder.copy_buffer_to_buffer(
+        // TODO: Could re-order here to read the other buffer first, then only read a couple items from this one.
         &buffers.match_offsets_buffer,
         0,
         &buffers.readback_offsets,
@@ -367,6 +380,15 @@ pub fn search_sha256_gpu_windows(
     }
 
     let result = offsets_all[..result_count].to_vec();
+
+    if (result_count as u64) >= buffers.match_offsets_capacity {
+        // Technically could be fine with a >, but doing a >= to flag issues nearing the limit.
+        anyhow::bail!(
+            "Result count exceeds match offsets capacity: {} > {}",
+            result_count,
+            buffers.match_offsets_capacity
+        );
+    }
 
     drop(offsets_bytes); // Required in order to be able to unmap the readback buffer.
     buffers.readback_offsets.unmap();

@@ -284,14 +284,13 @@ where
     let tail_bytes = input_data.len() % 4;
 
     // Pack full words (4 bytes → 1 u32, big endian).
+    let input_ptr = input_data.as_ptr();
     for word_idx in 0..full_words {
-        let base = word_idx * 4;
-        packed_destination[word_idx] = u32::from_be_bytes([
-            input_data[base],
-            input_data[base + 1],
-            input_data[base + 2],
-            input_data[base + 3],
-        ]);
+        // Unsafe: No bounds-checking needed because the upper bound is logically based on the input length.
+        unsafe {
+            let p = input_ptr.add(word_idx * 4) as *const u32;
+            packed_destination[word_idx] = u32::from_be(p.read_unaligned());
+        }
     }
 
     // Pack trailing partial word, if any.

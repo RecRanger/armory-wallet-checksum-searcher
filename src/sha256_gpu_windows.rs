@@ -408,14 +408,7 @@ pub fn search_sha256_gpu_windows(
         pass.dispatch_workgroups(num_workgroups, 1, 1);
     }
 
-    encoder.copy_buffer_to_buffer(
-        // TODO: Could re-order here to read the other buffer first, then only read a couple items from this one.
-        &buffers.match_offsets_buffer,
-        0,
-        &buffers.readback_offsets_buffer,
-        0,
-        buffers.match_offsets_capacity,
-    );
+    // First, read the match_count buffer.
     encoder.copy_buffer_to_buffer(
         &buffers.match_count_buffer,
         0,
@@ -430,34 +423,21 @@ pub fn search_sha256_gpu_windows(
         .readback_count_buffer
         .slice(..)
         .map_async(wgpu::MapMode::Read, |_| {});
-    buffers
-        .readback_offsets_buffer
-        .slice(..)
-        .map_async(wgpu::MapMode::Read, |_| {});
 
     gpu.device.poll(wgpu::PollType::wait_indefinitely())?;
 
     let result_count = {
-        let count_bytes = buffers.readback_count_buffer.slice(..).get_mapped_range();
-        let count_bytes_u32_array: &u32 = bytemuck::from_bytes::<u32>(&count_bytes);
-        *count_bytes_u32_array as usize
+        let mapped = buffers.readback_count_buffer.slice(..).get_mapped_range();
+        let count = *bytemuck::from_bytes::<u32>(&mapped) as usize;
+        drop(mapped);
+        buffers.readback_count_buffer.unmap();
+        count
     };
 
-    let offsets_bytes = buffers.readback_offsets_buffer.slice(..).get_mapped_range();
-    let offsets_all: &[u32] = bytemuck::cast_slice(&offsets_bytes);
-
-    if false {
-        println!(
-            "result_count={}, offsets_all.len()={}, first chunk of offsets_all: {:?}",
-            result_count,
-            offsets_all.len(),
-            &offsets_all[..std::cmp::min(64, offsets_all.len())],
-        );
-    }
-
-    let result = offsets_all[..result_count].to_vec();
-
-    if (result_count as u64) >= buffers.match_offsets_capacity {
+    // Hot path optimization: If no matches found, then no need to read the other buffer.
+    if result_count == 0 {
+        return Ok(Vec::new());
+    } else if (result_count as u64) >= buffers.match_offsets_capacity {
         // Technically could be fine with a >, but doing a >= to flag issues nearing the limit.
         anyhow::bail!(
             "Result count exceeds match offsets capacity: {} > {}",
@@ -466,10 +446,50 @@ pub fn search_sha256_gpu_windows(
         );
     }
 
-    drop(offsets_bytes); // Required in order to be able to unmap the readback buffer.
-    buffers.readback_offsets_buffer.unmap();
-    buffers.readback_count_buffer.unmap();
+    // Read the relevant slice of the match_offsets_buffer.
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    let readback_buffer_len_bytes = (result_count as u64) * 4;
+    encoder.copy_buffer_to_buffer(
+        &buffers.match_offsets_buffer,
+        0,
+        &buffers.readback_offsets_buffer,
+        0,
+        readback_buffer_len_bytes,
+    );
 
+    gpu.queue.submit(Some(encoder.finish()));
+
+    buffers
+        .readback_offsets_buffer
+        .slice(0..readback_buffer_len_bytes)
+        .map_async(wgpu::MapMode::Read, |_| {});
+
+    gpu.device.poll(wgpu::PollType::wait_indefinitely())?;
+
+    let result = {
+        let mapped = buffers
+            .readback_offsets_buffer
+            .slice(0..readback_buffer_len_bytes)
+            .get_mapped_range();
+
+        let offsets: &[u32] = bytemuck::cast_slice(&mapped);
+        let v = offsets.to_vec();
+
+        drop(mapped);
+        buffers.readback_offsets_buffer.unmap();
+        v
+    };
+
+    if false {
+        println!(
+            "result_count={}, result.len()={}, first chunk of result: {:?}",
+            result_count,
+            result.len(),
+            &result[..std::cmp::min(64, result.len())],
+        );
+    }
+
+    let result = result[..result_count].to_vec();
     Ok(result)
 }
 

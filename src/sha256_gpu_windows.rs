@@ -1,4 +1,7 @@
-use std::{cmp::min, sync::Mutex};
+use std::{
+    cmp::min,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Result;
 use enum_map::{Enum, EnumMap, enum_map};
@@ -41,8 +44,11 @@ struct GPU {
 }
 
 struct GpuBuffers {
-    input_buffer: wgpu::Buffer,
-    input_capacity: u64,
+    input_upload_buffer: wgpu::Buffer,
+    input_upload_capacity: u64,
+
+    input_storage_buffer: wgpu::Buffer,
+    input_storage_capacity: u64,
 
     search_config_buffer: wgpu::Buffer, // fixed-size (small struct)
 
@@ -242,13 +248,13 @@ pub fn search_sha256_gpu_windows(
 
     // Required buffer sizes.
     let match_offsets_buffer_size = get_match_offsets_buffer_size(total_offsets)?;
-    let required_input_bytes = (get_packed_data_words_length(input_data.len()) * 4) as u64;
+    let packed_data_length_bytes = (get_packed_data_words_length(input_data.len()) * 4) as u64;
 
     let mut guard = gpu.buffers.lock().unwrap();
     let buffers = get_or_resize_buffers(
         &gpu,
         &mut guard,
-        required_input_bytes,
+        packed_data_length_bytes,
         match_offsets_buffer_size,
     );
 
@@ -258,9 +264,15 @@ pub fn search_sha256_gpu_windows(
         compare_len_bytes,
     };
 
-    write_inputs(&gpu, buffers, &input_data, &search_config_val);
+    write_inputs(&gpu, buffers, &input_data, &search_config_val)?;
 
-    let result = dispatch_and_readback(&gpu, buffers, algo, num_workgroups)?;
+    let result = dispatch_and_readback(
+        &gpu,
+        buffers,
+        algo,
+        num_workgroups,
+        packed_data_length_bytes,
+    )?;
     Ok(result)
 }
 
@@ -314,7 +326,14 @@ fn get_or_resize_buffers<'a>(
     match_offsets_buffer_size: u64,
 ) -> &'a mut GpuBuffers {
     let buffers = guard.get_or_insert_with(|| {
-        let input_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        let input_upload_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("input_upload"),
+            size: required_input_bytes,
+            usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let input_storage_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("input"),
             size: required_input_bytes,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
@@ -362,7 +381,7 @@ fn get_or_resize_buffers<'a>(
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &gpu.bind_group_layout,
             entries: &[
-                entry(0, &input_buffer),
+                entry(0, &input_storage_buffer),
                 entry(1, &search_config_buffer),
                 entry(2, &match_offsets),
                 entry(3, &match_count),
@@ -371,8 +390,10 @@ fn get_or_resize_buffers<'a>(
         });
 
         GpuBuffers {
-            input_buffer,
-            input_capacity: required_input_bytes,
+            input_upload_buffer,
+            input_upload_capacity: required_input_bytes,
+            input_storage_buffer,
+            input_storage_capacity: required_input_bytes,
             search_config_buffer,
             match_offsets_buffer: match_offsets,
             match_offsets_capacity: match_offsets_buffer_size,
@@ -384,10 +405,19 @@ fn get_or_resize_buffers<'a>(
         }
     });
 
-    let (new_input_buffer, new_input_capacity) = ensure_buffer_capacity(
+    let (new_input_upload_buffer, new_input_upload_capacity) = ensure_buffer_capacity(
         &gpu.device,
-        Some(buffers.input_buffer.clone()),
-        buffers.input_capacity,
+        Some(buffers.input_upload_buffer.clone()),
+        buffers.input_upload_capacity,
+        required_input_bytes,
+        wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+        "input_upload",
+    );
+
+    let (new_input_storage_buffer, new_input_storage_capacity) = ensure_buffer_capacity(
+        &gpu.device,
+        Some(buffers.input_storage_buffer.clone()),
+        buffers.input_storage_capacity,
         required_input_bytes,
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         "input",
@@ -410,7 +440,8 @@ fn get_or_resize_buffers<'a>(
         wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         "readback_offsets",
     );
-    let buffers_changed = new_input_capacity != buffers.input_capacity
+    let buffers_changed = new_input_upload_capacity != buffers.input_upload_capacity
+        || new_input_storage_capacity != buffers.input_storage_capacity
         || new_match_offsets_capacity != buffers.match_offsets_capacity
         || new_readback_offsets_capacity != buffers.readback_offsets_capacity;
 
@@ -418,7 +449,7 @@ fn get_or_resize_buffers<'a>(
         buffers.bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &gpu.bind_group_layout,
             entries: &[
-                entry(0, &new_input_buffer),
+                entry(0, &new_input_storage_buffer),
                 entry(1, &buffers.search_config_buffer),
                 entry(2, &new_match_offsets_buffer),
                 entry(3, &buffers.match_count_buffer),
@@ -426,8 +457,11 @@ fn get_or_resize_buffers<'a>(
             label: Some("sliding-bind-group"),
         });
 
-        buffers.input_buffer = new_input_buffer;
-        buffers.input_capacity = new_input_capacity;
+        buffers.input_upload_buffer = new_input_upload_buffer;
+        buffers.input_upload_capacity = new_input_upload_capacity;
+
+        buffers.input_storage_buffer = new_input_storage_buffer;
+        buffers.input_storage_capacity = new_input_storage_capacity;
 
         buffers.match_offsets_buffer = new_match_offsets_buffer;
         buffers.match_offsets_capacity = new_match_offsets_capacity;
@@ -443,28 +477,45 @@ fn write_inputs(
     buffers: &mut GpuBuffers,
     input_data: &[u8],
     search_config_val: &SearchConfig,
-) {
-    // Write padded bytes directly from `input_data` into staging buffer.
+) -> anyhow::Result<()> {
+    // Write padded bytes directly from `input_data` into upload buffer.
     {
-        let packed_data_length_bytes =
-            std::num::NonZeroU64::new(get_packed_data_words_length(input_data.len()) as u64 * 4)
-                .expect("Input length cannot be zero");
+        let packed_data_length_bytes = get_packed_data_words_length(input_data.len()) as u64 * 4;
 
-        let mut temp_buffer_u8 = gpu
-            .queue
-            .write_buffer_with(&buffers.input_buffer, 0, packed_data_length_bytes)
-            .expect("Failed to write buffer with packed data length");
+        let upload_buffer_slice = buffers
+            .input_upload_buffer
+            .slice(0..packed_data_length_bytes);
 
-        debug_assert!(
-            // Must use .as_mut() or it panics.
-            temp_buffer_u8.as_mut().len() % 4 == 0,
-            "Buffer length is not a multiple of 4: {}",
-            temp_buffer_u8.as_mut().len()
-        );
+        let upload_map_done = Arc::new(Mutex::new(None));
+        let upload_map_done_clone = upload_map_done.clone();
+        upload_buffer_slice.map_async(wgpu::MapMode::Write, move |result| {
+            *upload_map_done_clone.lock().unwrap() = Some(result);
+        });
 
-        let temp_buffer_u32: &mut [u32] = bytemuck::cast_slice_mut(&mut temp_buffer_u8);
+        // VERY IMPORTANT: Drive the mapping to completion.
+        gpu.device.poll(wgpu::PollType::wait_indefinitely())?;
 
-        pack_input_data(input_data, temp_buffer_u32);
+        // Check mapping result.
+        match upload_map_done.lock().unwrap().take().unwrap() {
+            Ok(()) => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        {
+            let mut temp_buffer_u8 = upload_buffer_slice.get_mapped_range_mut();
+
+            debug_assert!(
+                // Must use .as_mut() or it panics.
+                temp_buffer_u8.as_mut().len() % 4 == 0,
+                "Buffer length is not a multiple of 4: {}",
+                temp_buffer_u8.as_mut().len()
+            );
+
+            let temp_buffer_u32: &mut [u32] = bytemuck::cast_slice_mut(&mut temp_buffer_u8);
+
+            pack_input_data(input_data, temp_buffer_u32);
+        }
+        buffers.input_upload_buffer.unmap();
     }
 
     gpu.queue.write_buffer(
@@ -477,6 +528,8 @@ fn write_inputs(
     // Don't need to clear/rewrite the actual result buffer, as its length is virtually limited by this counter.
     gpu.queue
         .write_buffer(&buffers.match_count_buffer, 0, bytemuck::bytes_of(&0u32));
+
+    Ok(())
 }
 
 fn dispatch_and_readback(
@@ -484,9 +537,20 @@ fn dispatch_and_readback(
     buffers: &mut GpuBuffers,
     algo: ComputePipelineVersionWindows,
     num_workgroups: u32,
+    packed_data_length_bytes: u64,
 ) -> anyhow::Result<Vec<u32>> {
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
 
+    // Copy in the input upload buffer to the input storage buffer.
+    encoder.copy_buffer_to_buffer(
+        &buffers.input_upload_buffer,
+        0,
+        &buffers.input_storage_buffer,
+        0,
+        packed_data_length_bytes,
+    );
+
+    // Dispatch.
     {
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(gpu.pipeline(algo));

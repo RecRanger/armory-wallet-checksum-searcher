@@ -13,9 +13,10 @@ override CONFIG_ENABLE_SHA256D: bool = true;
 struct SearchConfig {
     input_len_bytes: u32, // Like 1_000_000.
     message_len_bytes: u32, // Like 20.
-    compare_len_bytes: u32 // Like 4.
+    compare_len_bytes: u32 // Hardcoded to ALWAYS 4 currently.
 };
 
+/// `input_bytes` should be in Big Endian words (tightly packed).
 @group(0) @binding(0)
 var<storage, read> input_bytes: array<u32>;
 
@@ -51,32 +52,36 @@ const K: array<u32, 64> = array<u32,64>(
     0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
 );
 
-fn rotr(x: u32, n: u32) -> u32 {
-    return (x >> n) | (x << (32u - n));
+fn shw(x: u32, n: u32) -> u32 {
+    return (x << (n & 31u)) & 0xffffffffu;
 }
 
-fn ch(x: u32, y: u32, z: u32) -> u32 {
-    return (x & y) ^ (~x & z);
-}
-
-fn maj(x: u32, y: u32, z: u32) -> u32 {
-    return (x & y) ^ (x & z) ^ (y & z);
-}
-
-fn s0(x: u32) -> u32 {
-    return rotr(x, 2u) ^ rotr(x, 13u) ^ rotr(x, 22u);
-}
-
-fn s1(x: u32) -> u32 {
-    return rotr(x, 6u) ^ rotr(x, 11u) ^ rotr(x, 25u);
+fn r(x: u32, n: u32) -> u32 {
+    return (x >> n) | shw(x, 32u - n);
 }
 
 fn g0(x: u32) -> u32 {
-    return rotr(x, 7u) ^ rotr(x, 18u) ^ (x >> 3u);
+    return r(x, 7u) ^ r(x, 18u) ^ (x >> 3u);
 }
 
 fn g1(x: u32) -> u32 {
-    return rotr(x, 17u) ^ rotr(x, 19u) ^ (x >> 10u);
+    return r(x, 17u) ^ r(x, 19u) ^ (x >> 10u);
+}
+
+fn s0(x: u32) -> u32 {
+    return r(x, 2u) ^ r(x, 13u) ^ r(x, 22u);
+}
+
+fn s1(x: u32) -> u32 {
+    return r(x, 6u) ^ r(x, 11u) ^ r(x, 25u);
+}
+
+fn maj(a: u32, b: u32, c: u32) -> u32 {
+    return (a & b) ^ (a & c) ^ (b & c);
+}
+
+fn ch(e: u32, f: u32, g: u32) -> u32 {
+    return (e & f) ^ ((~e) & g);
 }
 
 fn swap_endianess32(v: u32) -> u32 {
@@ -101,11 +106,11 @@ fn load_byte(base: u32, index: u32) -> u32 {
 // ============================================================
 
 fn padded_len_bytes(message_len: u32) -> u32 {
-    let rem = (message_len + 1u + 8u) & 63u;
-
-    // Format: select(falseValue, trueValue, condition)
-    let pad_zeroes = select(64u-rem, 0u, rem == 0u);
-    return message_len + 1u + pad_zeroes + 8u;
+    // Usage: select(falseValue, trueValue, condition)
+    let total = message_len + 1u + 8u;
+    let rem = total & 63u;
+    let pad = select(64u - rem, 0u, rem == 0u);
+    return total + pad;
 }
 
 // ============================================================
@@ -125,7 +130,9 @@ fn build_block(
         (*w)[i] = 0u;
     }
 
+    // Pack message into `w` (block).
     for (var i = 0u; i < 64u; i++) {
+        // Fill the first 16 words with the 64 bytes as available (or padding or length u64).
         let global_byte = block_base + i;
         var b = 0u;
 
@@ -134,21 +141,31 @@ fn build_block(
         } else if (global_byte == message_len) {
             b = 0x80u;
         } else if (global_byte >= total_len - 8u) {
+            // Append the message length (in bits) in the last 8 bytes as a u64.
+            // High 32 bits of the u64 are all zero.
+            // Assume that the message length is in message_len fully as a u32.
             let bit_len = message_len * 8u;
-            let shift = (total_len - 1u - global_byte) * 8u;
-            b = (bit_len >> shift) & 0xffu;
+
+            let byte_index = global_byte - (total_len - 8u);
+            let shift = (7u - byte_index) * 8u;
+
+            // Only the lowest 4 bytes can be non-zero under our assumption.
+            if (shift < 32u) {
+                b = (bit_len >> shift) & 0xffu;
+            } else {
+                // High 32 bits of the u64 are all zero.
+                // TODO: Optimization: Could remove this assignment altogether.
+                b = 0u;
+            }
         }
 
-        let wi = i >> 2u;
-        let sh = (3u - (i & 3u)) * 8u;
-        (*w)[wi] |= b << sh;
+        let word_index = i >> 2u; // Same as i/4.
+        let shift = (3u - (i & 3u)) * 8u;
+        (*w)[word_index] |= b << shift;
     }
 
     for (var i = 16u; i < 64u; i++) {
-        (*w)[i] = (*w)[i-16u]
-                + g0((*w)[i-15u])
-                + (*w)[i-7u]
-                + g1((*w)[i-2u]);
+        w[i] = w[i-16u] + g0(w[i-15u]) + w[i-7u] + g1(w[i-2u]);
     }
 }
 
@@ -165,12 +182,12 @@ fn sha256_compress(w: ptr<function, array<u32,64>>,
     var e = (*h)[4];
     var f = (*h)[5];
     var g = (*h)[6];
-    var hh = (*h)[7];
+    var h0 = (*h)[7];
 
     for (var i = 0u; i < 64u; i++) {
-        let t1 = hh + s1(e) + ch(e,f,g) + K[i] + (*w)[i];
+        let t1 = h0 + s1(e) + ch(e,f,g) + K[i] + (*w)[i];
         let t2 = s0(a) + maj(a,b,c);
-        hh = g;
+        h0 = g;
         g = f;
         f = e;
         e = d + t1;
@@ -187,7 +204,7 @@ fn sha256_compress(w: ptr<function, array<u32,64>>,
     (*h)[4] += e;
     (*h)[5] += f;
     (*h)[6] += g;
-    (*h)[7] += hh;
+    (*h)[7] += h0;
 }
 
 // ============================================================
@@ -216,6 +233,13 @@ fn sliding_sha256d(@builtin(global_invocation_id) gid: vec3<u32>) {
         var w = array<u32,64>();
         build_block(offset, b, search_config.message_len_bytes, &w);
         sha256_compress(&w, &h);
+
+        // // Debug Hack: Dump packed block `w` into output buffer.
+        // if (offset == 50000) {
+        //     for (var i = 0u; i < 64u; i++) {
+        //         match_offsets[i] = w[i];
+        //     }
+        // }
     }
 
     if (CONFIG_ENABLE_SHA256D) {
@@ -237,18 +261,31 @@ fn sliding_sha256d(@builtin(global_invocation_id) gid: vec3<u32>) {
         sha256_compress(&w2, &h);
     }
 
-    let hash_word = swap_endianess32(h[0]);
-
-    var cmp = 0u;
-    for (var i = 0u; i < search_config.compare_len_bytes; i++) {
-        cmp |= load_byte(offset, search_config.message_len_bytes + i)
-            << ((search_config.compare_len_bytes - 1u - i) * 8u);
-    }
-
-    let mask = 0xffffffffu << ((4u - search_config.compare_len_bytes) * 8u);
-
-    if ((hash_word & mask) == cmp) {
+    // Compare the result. Assume compare_len_bytes == 4 (forced).
+    let input_word_be =
+        input_bytes[(offset + search_config.message_len_bytes) >> 2u];
+    let hash_word_be = h[0];
+    if (input_word_be == hash_word_be) {
+        // This part (match is found) occurs very rarely (so it's fine to use slow atomic operations).
         let idx = atomicAdd(&match_count, 1u);
-        match_offsets[idx] = offset;
+        if (idx < arrayLength(&match_offsets)) {
+            match_offsets[idx] = offset;
+        }
     }
+
+    // DEBUG: Write out the hash.
+    // if (offset == 50000) {
+    //     let idx = atomicAdd(&match_count, 32); // Meaningless.
+
+    //     for (var i = 0u; i < 32u; i += 4u) {
+    //         let w = h[i / 4u]; // BE word value
+    //         // let w = input_bytes[(offset + i) >> 2u];
+
+    //         // Write LE bytes
+    //         match_offsets[i + 0u] = (w >> 0u)  & 0xffu;
+    //         match_offsets[i + 1u] = (w >> 8u)  & 0xffu;
+    //         match_offsets[i + 2u] = (w >> 16u) & 0xffu;
+    //         match_offsets[i + 3u] = (w >> 24u) & 0xffu;
+    //     }
+    // }
 }

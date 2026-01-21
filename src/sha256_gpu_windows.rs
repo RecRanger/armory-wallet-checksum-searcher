@@ -3,7 +3,6 @@ use std::sync::Mutex;
 use anyhow::Result;
 use enum_map::{Enum, EnumMap, enum_map};
 use once_cell::sync::OnceCell;
-use wgpu::util::DeviceExt;
 
 // ============================================================
 // Pipeline selection
@@ -43,6 +42,7 @@ struct GPU {
 
 struct GpuBuffers {
     input_buffer: wgpu::Buffer,
+    // FIXME: If the buffer size changes, we must rebind the buffers.
     input_capacity: u64,
 
     search_config_buffer: wgpu::Buffer,
@@ -198,6 +198,12 @@ pub fn search_sha256_gpu_windows(
     debug_assert!(message_len_bytes > 0);
     debug_assert!(compare_len_bytes <= 32);
 
+    if compare_len_bytes != 4 {
+        unimplemented!(
+            "Only compare_len_bytes == 4 is supported currently in GPU Windows search. Use CPU mode instead."
+        );
+    }
+
     let gpu = gpu()?;
 
     let total_offsets = input_data.len() as u32 - message_len_bytes - compare_len_bytes + 1;
@@ -230,18 +236,19 @@ pub fn search_sha256_gpu_windows(
 
         let match_offsets = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("match_offsets"),
-            size: total_offsets as u64 * 4,
+            size: total_offsets as u64 * 4, // One u32 per potential output offset. Could be much lower.
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
-        let match_count = gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("match_count"),
-                contents: bytemuck::bytes_of(&0u32),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            });
+        let match_count = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("match_count"),
+            size: 4, // One u32.
+            usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST // Must reset the point at each start.
+                    | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
 
         let readback_offsets = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback_offsets"),
@@ -293,12 +300,16 @@ pub fn search_sha256_gpu_windows(
         0,
         bytemuck::cast_slice(&input_data_packed_u32),
     );
-
     gpu.queue.write_buffer(
         &buffers.search_config_buffer,
         0,
         bytemuck::bytes_of(&search_config_val),
     );
+
+    // Clear the output writer index.
+    // Don't need to clear/rewrite the actual result buffer, as its length is virtually limited by this counter.
+    gpu.queue
+        .write_buffer(&buffers.match_count_buffer, 0, bytemuck::bytes_of(&0u32));
 
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
 
@@ -346,11 +357,18 @@ pub fn search_sha256_gpu_windows(
     let offsets_bytes = buffers.readback_offsets.slice(..).get_mapped_range();
     let offsets_all: &[u32] = bytemuck::cast_slice(&offsets_bytes);
 
-    // Clone here is very cheap (generally, there are zero values in the slice).
-    // Required in order to be able to unmap the readback buffer.
-    let result = offsets_all[..result_count].to_vec().clone();
+    if false {
+        println!(
+            "result_count={}, offsets_all.len()={}, first chunk of offsets_all: {:?}",
+            result_count,
+            offsets_all.len(),
+            &offsets_all[..std::cmp::min(64, offsets_all.len())],
+        );
+    }
 
-    drop(offsets_bytes);
+    let result = offsets_all[..result_count].to_vec();
+
+    drop(offsets_bytes); // Required in order to be able to unmap the readback buffer.
     buffers.readback_offsets.unmap();
     buffers.readback_count.unmap();
 

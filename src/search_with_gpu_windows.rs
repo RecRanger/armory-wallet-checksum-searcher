@@ -1,5 +1,5 @@
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use log::{debug, info};
+use log::info;
 
 use crate::sha256_gpu_windows::{ComputePipelineVersionWindows, search_sha256_gpu_windows};
 use crate::types::{ChecksumPatternMatch, ChecksumPatternSpec};
@@ -56,11 +56,13 @@ pub fn search_for_checksums_gpu_windows(
             compare_len,
             ComputePipelineVersionWindows::Sha256DoubleWindows,
         )?;
-        debug!(
-            "Found {} matches for pattern {}",
-            matching_offsets.len(),
-            pattern_idx
-        );
+        if false {
+            println!(
+                "Found {} matches for pattern {}",
+                matching_offsets.len(),
+                pattern_idx
+            );
+        }
 
         // Materialize matches (rare path).
         for &chunk_start_idx in &matching_offsets {

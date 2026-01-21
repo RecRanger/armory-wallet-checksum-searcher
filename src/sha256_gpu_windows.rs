@@ -240,18 +240,14 @@ pub fn search_sha256_gpu_windows(
     let wg_size = gpu.device.limits().max_compute_workgroup_size_x;
     let num_workgroups = (total_offsets + wg_size - 1) / wg_size;
 
-    // Pack input bytes into u32 words (big endian). Note: Does not do the SHA256 packing here.
-    let input_data_packed_u32 = pack_input_data(input_data);
-
     // Required buffer sizes.
     let match_offsets_buffer_size = get_match_offsets_buffer_size(total_offsets)?;
-    let required_input_bytes = (input_data_packed_u32.len() * 4) as u64;
+    let required_input_bytes = (get_packed_data_words_length(input_data.len()) * 4) as u64;
 
     let mut guard = gpu.buffers.lock().unwrap();
     let buffers = get_or_resize_buffers(
         &gpu,
         &mut guard,
-        &input_data_packed_u32,
         required_input_bytes,
         match_offsets_buffer_size,
     );
@@ -262,25 +258,40 @@ pub fn search_sha256_gpu_windows(
         compare_len_bytes,
     };
 
-    write_inputs(&gpu, buffers, &input_data_packed_u32, &search_config_val);
+    write_inputs(&gpu, buffers, &input_data, &search_config_val);
 
     let result = dispatch_and_readback(&gpu, buffers, algo, num_workgroups)?;
     Ok(result)
 }
 
-/// Pack input bytes into u32 words (big endian). Note: Does not do the SHA256 packing here.
-fn pack_input_data(input_data: &[u8]) -> Vec<u32> {
-    let mut packed = vec![0u32; (input_data.len() + 3) / 4];
-    for (byte_idx, byte_val) in input_data.iter().enumerate() {
-        packed[byte_idx / 4] |= (*byte_val as u32) << (24 - 8 * (byte_idx & 3));
+/// Pack input bytes into u32 words (big endian).
+/// Note: Does not do the SHA256 packing here (no 0x80, padding, length).
+fn pack_input_data<D>(input_data: &[u8], mut packed_destination: D)
+where
+    D: AsMut<[u32]>,
+{
+    let packed_destination = packed_destination.as_mut();
+    let required_len_words = get_packed_data_words_length(input_data.len());
+    if packed_destination.len() < required_len_words {
+        panic!("packed_destination is too small");
     }
-    packed
+
+    // Zero required because we're reusing the buffer. // TODO: Do more selectively.
+    packed_destination[..required_len_words].fill(0);
+
+    for (byte_idx, byte_val) in input_data.iter().enumerate() {
+        packed_destination[byte_idx / 4] |= (*byte_val as u32) << (24 - 8 * (byte_idx & 3));
+    }
+}
+
+/// Get the number of u32 words required to store the input data.
+fn get_packed_data_words_length(input_data_length_bytes: usize) -> usize {
+    (input_data_length_bytes + 3) / 4
 }
 
 fn get_or_resize_buffers<'a>(
     gpu: &'a GPU,
     guard: &'a mut Option<GpuBuffers>,
-    input_data_packed_u32: &[u32],
     required_input_bytes: u64,
     match_offsets_buffer_size: u64,
 ) -> &'a mut GpuBuffers {
@@ -343,7 +354,7 @@ fn get_or_resize_buffers<'a>(
 
         GpuBuffers {
             input_buffer,
-            input_capacity: input_data_packed_u32.len() as u64 * 4,
+            input_capacity: required_input_bytes,
             search_config_buffer,
             match_offsets_buffer: match_offsets,
             match_offsets_capacity: match_offsets_buffer_size,
@@ -412,14 +423,32 @@ fn get_or_resize_buffers<'a>(
 fn write_inputs(
     gpu: &GPU,
     buffers: &mut GpuBuffers,
-    input_data_packed_u32: &[u32],
+    input_data: &[u8],
     search_config_val: &SearchConfig,
 ) {
-    gpu.queue.write_buffer(
-        &buffers.input_buffer,
-        0,
-        bytemuck::cast_slice(input_data_packed_u32),
-    );
+    // Write padded bytes directly from `input_data` into staging buffer.
+    {
+        let packed_data_length_bytes =
+            std::num::NonZeroU64::new(get_packed_data_words_length(input_data.len()) as u64 * 4)
+                .expect("Input length cannot be zero");
+
+        let mut temp_buffer_u8 = gpu
+            .queue
+            .write_buffer_with(&buffers.input_buffer, 0, packed_data_length_bytes)
+            .expect("Failed to write buffer with packed data length");
+
+        debug_assert!(
+            // Must use .as_mut() or it panics.
+            temp_buffer_u8.as_mut().len() % 4 == 0,
+            "Buffer length is not a multiple of 4: {}",
+            temp_buffer_u8.as_mut().len()
+        );
+
+        let temp_buffer_u32: &mut [u32] = bytemuck::cast_slice_mut(&mut temp_buffer_u8);
+
+        pack_input_data(input_data, temp_buffer_u32);
+    }
+
     gpu.queue.write_buffer(
         &buffers.search_config_buffer,
         0,

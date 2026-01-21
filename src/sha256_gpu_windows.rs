@@ -232,6 +232,7 @@ pub fn search_sha256_gpu_windows(
 ) -> anyhow::Result<Vec<u32>> {
     debug_assert!(message_len_bytes > 0);
     debug_assert!(compare_len_bytes <= 32);
+    debug_assert!(input_data.len() as u32 <= get_max_input_len_bytes()?);
 
     let gpu = gpu()?;
 
@@ -470,6 +471,20 @@ pub fn search_sha256_gpu_windows(
     buffers.readback_count_buffer.unmap();
 
     Ok(result)
+}
+
+/// Max length of the input data to `search_sha256_gpu_windows()`.
+pub fn get_max_input_len_bytes() -> anyhow::Result<u32> {
+    // TODO: Could make it a 2D operation and drastically increase this.
+    let val = gpu()?.device.limits().max_compute_workgroups_per_dimension as u64
+        * gpu()?.device.limits().max_compute_workgroup_size_x as u64;
+
+    // Return u32::MAX or val.
+    if val > u32::MAX as u64 {
+        Ok(u32::MAX)
+    } else {
+        Ok(val as u32)
+    }
 }
 
 fn entry(binding: u32, buffer: &'_ wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {

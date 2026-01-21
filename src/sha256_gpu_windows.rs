@@ -241,22 +241,53 @@ pub fn search_sha256_gpu_windows(
     let num_workgroups = (total_offsets + wg_size - 1) / wg_size;
 
     // Pack input bytes into u32 words (big endian). Note: Does not do the SHA256 packing here.
-    let mut input_data_packed_u32 = vec![0u32; (input_data.len() + 3) / 4];
-    for (byte_idx, byte_val) in input_data.iter().enumerate() {
-        input_data_packed_u32[byte_idx / 4] |= (*byte_val as u32) << (24 - 8 * (byte_idx & 3));
-    }
+    let input_data_packed_u32 = pack_input_data(input_data);
 
     // Required buffer sizes.
     let match_offsets_buffer_size = get_match_offsets_buffer_size(total_offsets)?;
     let required_input_bytes = (input_data_packed_u32.len() * 4) as u64;
 
     let mut guard = gpu.buffers.lock().unwrap();
+    let buffers = get_or_resize_buffers(
+        &gpu,
+        &mut guard,
+        &input_data_packed_u32,
+        required_input_bytes,
+        match_offsets_buffer_size,
+    );
 
+    let search_config_val = SearchConfig {
+        input_len_bytes: input_data.len() as u32,
+        message_len_bytes,
+        compare_len_bytes,
+    };
+
+    write_inputs(&gpu, buffers, &input_data_packed_u32, &search_config_val);
+
+    let result = dispatch_and_readback(&gpu, buffers, algo, num_workgroups)?;
+    Ok(result)
+}
+
+/// Pack input bytes into u32 words (big endian). Note: Does not do the SHA256 packing here.
+fn pack_input_data(input_data: &[u8]) -> Vec<u32> {
+    let mut packed = vec![0u32; (input_data.len() + 3) / 4];
+    for (byte_idx, byte_val) in input_data.iter().enumerate() {
+        packed[byte_idx / 4] |= (*byte_val as u32) << (24 - 8 * (byte_idx & 3));
+    }
+    packed
+}
+
+fn get_or_resize_buffers<'a>(
+    gpu: &'a GPU,
+    guard: &'a mut Option<GpuBuffers>,
+    input_data_packed_u32: &[u32],
+    required_input_bytes: u64,
+    match_offsets_buffer_size: u64,
+) -> &'a mut GpuBuffers {
     let buffers = guard.get_or_insert_with(|| {
         let input_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("input"),
             size: required_input_bytes,
-            // TODO: Maybe use MAP_WRITE here, and then pack directly into the buffer once it's mapped.
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -281,7 +312,7 @@ pub fn search_sha256_gpu_windows(
             size: 4, // One u32.
             usage: wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::COPY_DST // Must reset the point at each start.
-                    | wgpu::BufferUsages::COPY_SRC,
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -375,30 +406,38 @@ pub fn search_sha256_gpu_windows(
         buffers.readback_offsets_buffer = new_readback_offsets_buffer;
         buffers.readback_offsets_capacity = new_readback_offsets_capacity;
     }
+    buffers
+}
 
-    let search_config_val = SearchConfig {
-        input_len_bytes: input_data.len() as u32,
-        message_len_bytes,
-        compare_len_bytes,
-    };
-
-    // Write the inputs.
+fn write_inputs(
+    gpu: &GPU,
+    buffers: &mut GpuBuffers,
+    input_data_packed_u32: &[u32],
+    search_config_val: &SearchConfig,
+) {
     gpu.queue.write_buffer(
         &buffers.input_buffer,
         0,
-        bytemuck::cast_slice(&input_data_packed_u32),
+        bytemuck::cast_slice(input_data_packed_u32),
     );
     gpu.queue.write_buffer(
         &buffers.search_config_buffer,
         0,
-        bytemuck::bytes_of(&search_config_val),
+        bytemuck::bytes_of(search_config_val),
     );
 
     // Clear the output writer index.
     // Don't need to clear/rewrite the actual result buffer, as its length is virtually limited by this counter.
     gpu.queue
         .write_buffer(&buffers.match_count_buffer, 0, bytemuck::bytes_of(&0u32));
+}
 
+fn dispatch_and_readback(
+    gpu: &GPU,
+    buffers: &mut GpuBuffers,
+    algo: ComputePipelineVersionWindows,
+    num_workgroups: u32,
+) -> anyhow::Result<Vec<u32>> {
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
 
     {

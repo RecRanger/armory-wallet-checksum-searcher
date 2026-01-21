@@ -42,18 +42,19 @@ struct GPU {
 
 struct GpuBuffers {
     input_buffer: wgpu::Buffer,
-    // FIXME: If the buffer size changes, we must rebind the buffers.
     input_capacity: u64,
 
-    search_config_buffer: wgpu::Buffer,
+    search_config_buffer: wgpu::Buffer, // fixed-size (small struct)
 
     match_offsets_buffer: wgpu::Buffer,
     match_offsets_capacity: u64,
 
-    match_count_buffer: wgpu::Buffer,
+    match_count_buffer: wgpu::Buffer, // fixed-size (one u32)
 
-    readback_offsets: wgpu::Buffer,
-    readback_count: wgpu::Buffer,
+    readback_offsets_buffer: wgpu::Buffer,
+    readback_offsets_capacity: u64,
+
+    readback_count_buffer: wgpu::Buffer, // fixed-size (one u32)
 
     bind_group: wgpu::BindGroup,
 }
@@ -166,6 +167,30 @@ fn layout_entry_uniform(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+fn ensure_buffer_capacity(
+    device: &wgpu::Device,
+    existing: Option<wgpu::Buffer>,
+    existing_capacity: u64,
+    required_capacity: u64,
+    usage: wgpu::BufferUsages,
+    label: &str,
+) -> (wgpu::Buffer, u64) {
+    if let Some(buffer) = existing {
+        if existing_capacity >= required_capacity {
+            return (buffer, existing_capacity);
+        }
+    }
+
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: required_capacity,
+        usage,
+        mapped_at_creation: false,
+    });
+
+    (buffer, required_capacity)
+}
+
 fn create_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -213,7 +238,6 @@ pub fn search_sha256_gpu_windows(
     let total_offsets = input_data.len() as u32 - message_len_bytes - compare_len_bytes + 1;
     let wg_size = gpu.device.limits().max_compute_workgroup_size_x;
     let num_workgroups = (total_offsets + wg_size - 1) / wg_size;
-    let match_offsets_buffer_size = get_match_offsets_buffer_size(total_offsets)?;
 
     // Pack input bytes into u32 words (big endian). Note: Does not do the SHA256 packing here.
     let mut input_data_packed_u32 = vec![0u32; (input_data.len() + 3) / 4];
@@ -221,12 +245,16 @@ pub fn search_sha256_gpu_windows(
         input_data_packed_u32[byte_idx / 4] |= (*byte_val as u32) << (24 - 8 * (byte_idx & 3));
     }
 
+    // Required buffer sizes.
+    let match_offsets_buffer_size = get_match_offsets_buffer_size(total_offsets)?;
+    let required_input_bytes = (input_data_packed_u32.len() * 4) as u64;
+
     let mut guard = gpu.buffers.lock().unwrap();
 
     let buffers = guard.get_or_insert_with(|| {
         let input_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("input"),
-            size: (input_data_packed_u32.len() * 4) as u64,
+            size: required_input_bytes,
             // TODO: Maybe use MAP_WRITE here, and then pack directly into the buffer once it's mapped.
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -288,11 +316,64 @@ pub fn search_sha256_gpu_windows(
             match_offsets_buffer: match_offsets,
             match_offsets_capacity: match_offsets_buffer_size,
             match_count_buffer: match_count,
-            readback_offsets,
-            readback_count,
+            readback_offsets_buffer: readback_offsets,
+            readback_offsets_capacity: match_offsets_buffer_size,
+            readback_count_buffer: readback_count,
             bind_group,
         }
     });
+
+    let (new_input_buffer, new_input_capacity) = ensure_buffer_capacity(
+        &gpu.device,
+        Some(buffers.input_buffer.clone()),
+        buffers.input_capacity,
+        required_input_bytes,
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        "input",
+    );
+
+    let (new_match_offsets_buffer, new_match_offsets_capacity) = ensure_buffer_capacity(
+        &gpu.device,
+        Some(buffers.match_offsets_buffer.clone()),
+        buffers.match_offsets_capacity,
+        match_offsets_buffer_size,
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        "match_offsets",
+    );
+
+    let (new_readback_offsets_buffer, new_readback_offsets_capacity) = ensure_buffer_capacity(
+        &gpu.device,
+        Some(buffers.readback_offsets_buffer.clone()),
+        buffers.readback_offsets_capacity,
+        match_offsets_buffer_size,
+        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        "readback_offsets",
+    );
+    let buffers_changed = new_input_capacity != buffers.input_capacity
+        || new_match_offsets_capacity != buffers.match_offsets_capacity
+        || new_readback_offsets_capacity != buffers.readback_offsets_capacity;
+
+    if buffers_changed {
+        buffers.bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &gpu.bind_group_layout,
+            entries: &[
+                entry(0, &new_input_buffer),
+                entry(1, &buffers.search_config_buffer),
+                entry(2, &new_match_offsets_buffer),
+                entry(3, &buffers.match_count_buffer),
+            ],
+            label: Some("sliding-bind-group"),
+        });
+
+        buffers.input_buffer = new_input_buffer;
+        buffers.input_capacity = new_input_capacity;
+
+        buffers.match_offsets_buffer = new_match_offsets_buffer;
+        buffers.match_offsets_capacity = new_match_offsets_capacity;
+
+        buffers.readback_offsets_buffer = new_readback_offsets_buffer;
+        buffers.readback_offsets_capacity = new_readback_offsets_capacity;
+    }
 
     let search_config_val = SearchConfig {
         input_len_bytes: input_data.len() as u32,
@@ -330,14 +411,14 @@ pub fn search_sha256_gpu_windows(
         // TODO: Could re-order here to read the other buffer first, then only read a couple items from this one.
         &buffers.match_offsets_buffer,
         0,
-        &buffers.readback_offsets,
+        &buffers.readback_offsets_buffer,
         0,
         buffers.match_offsets_capacity,
     );
     encoder.copy_buffer_to_buffer(
         &buffers.match_count_buffer,
         0,
-        &buffers.readback_count,
+        &buffers.readback_count_buffer,
         0,
         4,
     );
@@ -345,23 +426,23 @@ pub fn search_sha256_gpu_windows(
     gpu.queue.submit(Some(encoder.finish()));
 
     buffers
-        .readback_count
+        .readback_count_buffer
         .slice(..)
         .map_async(wgpu::MapMode::Read, |_| {});
     buffers
-        .readback_offsets
+        .readback_offsets_buffer
         .slice(..)
         .map_async(wgpu::MapMode::Read, |_| {});
 
     gpu.device.poll(wgpu::PollType::wait_indefinitely())?;
 
     let result_count = {
-        let count_bytes = buffers.readback_count.slice(..).get_mapped_range();
+        let count_bytes = buffers.readback_count_buffer.slice(..).get_mapped_range();
         let count_bytes_u32_array: &u32 = bytemuck::from_bytes::<u32>(&count_bytes);
         *count_bytes_u32_array as usize
     };
 
-    let offsets_bytes = buffers.readback_offsets.slice(..).get_mapped_range();
+    let offsets_bytes = buffers.readback_offsets_buffer.slice(..).get_mapped_range();
     let offsets_all: &[u32] = bytemuck::cast_slice(&offsets_bytes);
 
     if false {
@@ -385,8 +466,8 @@ pub fn search_sha256_gpu_windows(
     }
 
     drop(offsets_bytes); // Required in order to be able to unmap the readback buffer.
-    buffers.readback_offsets.unmap();
-    buffers.readback_count.unmap();
+    buffers.readback_offsets_buffer.unmap();
+    buffers.readback_count_buffer.unmap();
 
     Ok(result)
 }

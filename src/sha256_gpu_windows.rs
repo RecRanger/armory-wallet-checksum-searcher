@@ -208,12 +208,6 @@ pub fn search_sha256_gpu_windows(
     debug_assert!(message_len_bytes > 0);
     debug_assert!(compare_len_bytes <= 32);
 
-    if compare_len_bytes != 4 {
-        unimplemented!(
-            "Only compare_len_bytes == 4 is supported currently in GPU Windows search. Use CPU mode instead."
-        );
-    }
-
     let gpu = gpu()?;
 
     let total_offsets = input_data.len() as u32 - message_len_bytes - compare_len_bytes + 1;

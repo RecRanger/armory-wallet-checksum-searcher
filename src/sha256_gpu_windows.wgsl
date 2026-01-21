@@ -13,7 +13,7 @@ override CONFIG_ENABLE_SHA256D: bool = true;
 struct SearchConfig {
     input_len_bytes: u32, // Like 1_000_000.
     message_len_bytes: u32, // Like 20.
-    compare_len_bytes: u32 // Hardcoded to ALWAYS 4 currently.
+    compare_len_bytes: u32 // Like 4.
 };
 
 /// `input_bytes` should be in Big Endian words (tightly packed).

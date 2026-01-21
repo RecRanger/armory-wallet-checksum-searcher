@@ -265,7 +265,11 @@ pub fn search_sha256_gpu_windows(
 }
 
 /// Pack input bytes into u32 words (big endian).
+///
 /// Note: Does not do the SHA256 packing here (no 0x80, padding, length).
+/// This function assumes packed_destination may not be zeroed.
+/// This function doesn't write past the end of the last word filled by `input_data`,
+/// even if the buffer is longer than the `input_data` (after word conversion).
 fn pack_input_data<D>(input_data: &[u8], mut packed_destination: D)
 where
     D: AsMut<[u32]>,
@@ -276,11 +280,26 @@ where
         panic!("packed_destination is too small");
     }
 
-    // Zero required because we're reusing the buffer. // TODO: Do more selectively.
-    packed_destination[..required_len_words].fill(0);
+    let full_words = input_data.len() / 4;
+    let tail_bytes = input_data.len() % 4;
 
-    for (byte_idx, byte_val) in input_data.iter().enumerate() {
-        packed_destination[byte_idx / 4] |= (*byte_val as u32) << (24 - 8 * (byte_idx & 3));
+    // Pack full words (4 bytes → 1 u32, big endian).
+    for word_idx in 0..full_words {
+        let base = word_idx * 4;
+        packed_destination[word_idx] = u32::from_be_bytes([
+            input_data[base],
+            input_data[base + 1],
+            input_data[base + 2],
+            input_data[base + 3],
+        ]);
+    }
+
+    // Pack trailing partial word, if any.
+    if tail_bytes != 0 {
+        let base = full_words * 4;
+        let mut tmp = [0u8; 4];
+        tmp[..tail_bytes].copy_from_slice(&input_data[base..base + tail_bytes]);
+        packed_destination[full_words] = u32::from_be_bytes(tmp);
     }
 }
 

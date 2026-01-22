@@ -1,7 +1,9 @@
 mod search;
 mod search_with_cpu;
 mod search_with_gpu;
+mod search_with_gpu_windows;
 mod sha256_gpu;
+mod sha256_gpu_windows;
 mod types;
 
 #[cfg(test)]
@@ -77,8 +79,11 @@ struct Args {
     #[clap(short, long = "pattern", value_parser)]
     patterns: Vec<ChecksumPatternSpec>,
 
-    #[clap(long = "gpu", value_parser)]
-    use_gpu: bool,
+    #[clap(long = "gpu-slow", value_parser)]
+    use_gpu_slow: bool,
+
+    #[clap(long = "gpu-windows", value_parser)]
+    use_gpu_windows: bool,
 }
 
 impl Args {
@@ -123,8 +128,12 @@ fn main() -> anyhow::Result<()> {
     let pattern_matches = search::process_file(
         &args.input_file,
         &checksum_patterns,
-        if args.use_gpu {
-            types::ProcessorChoice::Gpu
+        if args.use_gpu_slow && args.use_gpu_windows {
+            anyhow::bail!("Cannot use both --gpu-slow and --gpu-windows options simultaneously.")
+        } else if args.use_gpu_slow {
+            types::ProcessorChoice::GpuSlowMessages
+        } else if args.use_gpu_windows {
+            types::ProcessorChoice::GpuWindows
         } else {
             types::ProcessorChoice::Cpu
         },

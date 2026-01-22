@@ -10,6 +10,7 @@ use log::info;
 use crate::{
     search_with_cpu::search_for_checksums_cpu,
     search_with_gpu::search_for_checksums_gpu,
+    search_with_gpu_windows::search_for_checksums_gpu_windows,
     types::{ChecksumPatternMatch, ChecksumPatternSpec, ProcessorChoice},
 };
 
@@ -20,7 +21,8 @@ pub fn search_for_checksums(
 ) -> anyhow::Result<Vec<ChecksumPatternMatch>> {
     match processor_choice {
         ProcessorChoice::Cpu => Ok(search_for_checksums_cpu(data, checksum_patterns)),
-        ProcessorChoice::Gpu => search_for_checksums_gpu(data, checksum_patterns),
+        ProcessorChoice::GpuSlowMessages => search_for_checksums_gpu(data, checksum_patterns),
+        ProcessorChoice::GpuWindows => search_for_checksums_gpu_windows(data, checksum_patterns),
     }
 }
 
@@ -117,7 +119,8 @@ mod tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_single_match_at_offset_zero(#[case] processor: ProcessorChoice) {
         // Test Case 1: Single valid match at the beginning of data
         let chunk = b"Hello, World!";
@@ -139,7 +142,8 @@ mod tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_match_with_offset(#[case] processor: ProcessorChoice) {
         // Test Case 2: Valid match with data before it
         let prefix = b"PADDING_DATA_";
@@ -166,7 +170,8 @@ mod tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_multiple_matches_different_patterns(#[case] processor: ProcessorChoice) {
         // Test Case 3: Multiple matches with different pattern specs
         let chunk1 = b"First";
@@ -199,7 +204,8 @@ mod tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_all_zeros_skipped(#[case] processor: ProcessorChoice) {
         // Test Case 4: All-zero data should be skipped
         let chunk_len = 10;
@@ -218,7 +224,8 @@ mod tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_invalid_checksum_no_match(#[case] processor: ProcessorChoice) {
         // Test Case 5: Invalid checksum should not match
         let chunk = b"Data with wrong checksum";
@@ -243,7 +250,8 @@ mod tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_insufficient_data_length(#[case] processor: ProcessorChoice) {
         // Test Case 6: Pattern longer than available data
         let chunk = b"Short";
@@ -267,7 +275,8 @@ mod tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_pattern_at_exact_end(#[case] processor: ProcessorChoice) {
         // Test Case 7: Valid pattern ending exactly at data boundary
         let chunk = b"Edge";
@@ -287,7 +296,8 @@ mod tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_minimum_size_chunk(#[case] processor: ProcessorChoice) {
         // Test Case 8: Minimum size chunk (1 byte)
         let chunk = b"X";
@@ -307,7 +317,8 @@ mod tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_multiple_patterns_same_offset(#[case] processor: ProcessorChoice) {
         // Test Case 10: Multiple pattern specs that could match at same location
         let chunk = b"Test data here";
@@ -339,7 +350,8 @@ mod tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_consecutive_valid_chunks(#[case] processor: ProcessorChoice) {
         // Test Case 11: Back-to-back valid chunks
         let chunk1 = b"First";
@@ -370,7 +382,8 @@ mod tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_empty_data(#[case] processor: ProcessorChoice) {
         // Test Case 12: Empty data
         let test_data: Vec<u8> = vec![];
@@ -386,7 +399,8 @@ mod tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_empty_patterns(#[case] processor: ProcessorChoice) {
         // Test Case 13: Empty pattern list
         let chunk = b"Some data";
@@ -404,7 +418,8 @@ mod tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_large_checksum_length(#[case] processor: ProcessorChoice) {
         // Test Case 14: Full 32-byte checksum
         let chunk = b"Full checksum";
@@ -424,7 +439,8 @@ mod tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_partial_match_at_end(#[case] processor: ProcessorChoice) {
         // Test Case 15: Incomplete pattern at end of data (should not match)
         let chunk = b"Complete";
@@ -493,7 +509,8 @@ mod tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_with_large_random_data_1(#[case] processor: ProcessorChoice) {
         if !get_test_config().enable_slow_tests {
             return;
@@ -540,7 +557,8 @@ mod tests {
     /// Best nominal test case for the entire project.
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_with_cases_injected_to_random_data(#[case] processor: ProcessorChoice) {
         // MARK: Main test.
         // Test case found by trial-and-error with find_random_seeds_with_matches()
@@ -587,7 +605,12 @@ mod tests {
                     231, 98
                 ],
                 checksum_data: vec![102, 130, 142, 232]
-            }
+            } // Single-hash of this:
+              // ['0x8b', '0x5c', '0x23', '0xd0', '0xdc', '0x7e', '0x48', '0xf6', '0x46', '0x6',
+              // '0x89', '0xa8', '0x2b', '0xcf', '0x8', '0x51', '0x17', '0x35', '0x90', '0x7d',
+              // '0xae', '0x31', '0x44', '0xe', '0x94', '0x48', '0x9e', '0x22', '0x94', '0x33', '0x89', '0xbd']
+              // [139, 92, 35, 208, 220, 126, 72, 246, 70, 6, 137, 168, 43, 207, 8, 81, 23, 53, 144, 125, 174,
+              // 49, 68, 14, 148, 72, 158, 34, 148, 51, 137, 189]
         );
         assert_eq!(
             matches[1],
@@ -640,7 +663,8 @@ mod advanced_tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_real_world_bitcoin_style_data(#[case] processor: ProcessorChoice) {
         // Simulate Bitcoin-style transaction with checksum
         let version: u32 = 1;
@@ -665,7 +689,8 @@ mod advanced_tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_performance_no_matches_large_data(#[case] processor: ProcessorChoice) {
         // Test with 1MB of random-ish data (no valid checksums).
         let test_data: Vec<u8> = (0..get_test_config().max_data_size_mebibytes)
@@ -691,7 +716,8 @@ mod advanced_tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_multiple_checksums_different_lengths(#[case] processor: ProcessorChoice) {
         // Test finding patterns with varying checksum lengths
         // Note: When a longer checksum is present, shorter checksum patterns will also match
@@ -785,7 +811,8 @@ mod advanced_tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_non_overlapping_checksum_patterns(#[case] processor: ProcessorChoice) {
         // Alternative test: use different chunk data to avoid overlapping matches.
         let chunk1 = b"First chunk";
@@ -881,7 +908,8 @@ mod advanced_tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_checksum_collision_detection(#[case] processor: ProcessorChoice) {
         // Test that only exact checksum matches are found
         let chunk = b"Original data";
@@ -917,7 +945,8 @@ mod advanced_tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_nested_valid_patterns(#[case] processor: ProcessorChoice) {
         // Create a pattern where one valid chunk+checksum contains another
         let inner_chunk = b"Inner";
@@ -962,7 +991,8 @@ mod advanced_tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_boundary_offset_calculation(#[case] processor: ProcessorChoice) {
         // Verify offset calculations are correct at various positions
         let chunk = b"PATTERN";
@@ -1004,7 +1034,8 @@ mod advanced_tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_single_byte_variations(#[case] processor: ProcessorChoice) {
         // Test that changing a single byte in chunk breaks the match
         let chunk = b"Test data for verification";
@@ -1039,7 +1070,8 @@ mod advanced_tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_all_zeros_with_valid_checksum_nearby(#[case] processor: ProcessorChoice) {
         // Ensure all-zeros are skipped even when valid patterns exist nearby
         let zeros = vec![0u8; 20];
@@ -1069,7 +1101,8 @@ mod advanced_tests {
 
     #[rstest]
     #[case(ProcessorChoice::Cpu)]
-    #[case(ProcessorChoice::Gpu)]
+    #[case(ProcessorChoice::GpuSlowMessages)]
+    #[case(ProcessorChoice::GpuWindows)]
     fn test_maximum_checksum_length(#[case] processor: ProcessorChoice) {
         // Test with maximum possible checksum (full SHA256d output)
         let chunk = b"Max checksum test";

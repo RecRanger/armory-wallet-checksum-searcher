@@ -40,4 +40,7 @@ sudo cargo run --release -- -i /dev/sda --log ./output_log.log --ndjson ./output
 
 Please Star this repo if it's helpful. Open Issues.
 
-WGPU Tutorial: https://sotrh.github.io/learn-wgpu/compute/introduction/
+### Resources
+
+* WGPU Tutorial: https://sotrh.github.io/learn-wgpu/compute/introduction/
+* SHA256 Python Reference: https://github.com/keanemind/Python-SHA-256

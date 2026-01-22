@@ -1,7 +1,6 @@
 // https://sotrh.github.io/learn-wgpu/compute/introduction/
 
 use enum_map::{Enum, EnumMap, enum_map};
-use log::debug;
 use once_cell::sync::OnceCell;
 use std::sync::{Arc, Mutex};
 
@@ -446,7 +445,7 @@ where
         || result_capacity != buffers.result_buffer_capacity_bytes
         || readback_capacity != buffers.readback_buffer_capacity_bytes
     {
-        debug!("Recreating bind group due to buffer capacity change");
+        println!("Recreating bind group due to buffer capacity change");
 
         buffers.bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &gpu.bind_group_layout,

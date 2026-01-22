@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::str::FromStr;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct ChecksumPatternSpec {
     pub chunk_len: usize,
     pub checksum_len: usize,

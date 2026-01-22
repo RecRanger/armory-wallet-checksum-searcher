@@ -3,8 +3,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::types::{ChecksumPatternMatch, ChecksumPatternSpec};
 use anyhow::Result;
 use enum_map::{Enum, EnumMap, enum_map};
+use log::info;
 use once_cell::sync::OnceCell;
 
 // ============================================================
@@ -238,17 +240,22 @@ fn create_pipeline(
 
 pub fn search_sha256_gpu_windows(
     input_data: &[u8],
-    message_len_bytes: u32,
-    compare_len_bytes: u32,
+    input_patterns: &[ChecksumPatternSpec],
+    input_data_absolute_offset: usize,
     algo: ComputePipelineVersionWindows,
-) -> anyhow::Result<Vec<u32>> {
-    debug_assert!(message_len_bytes > 0);
-    debug_assert!(compare_len_bytes <= 32);
+) -> anyhow::Result<Vec<ChecksumPatternMatch>> {
     debug_assert!(input_data.len() as u32 <= get_max_input_len_bytes()?);
 
     let gpu = gpu()?;
 
-    let total_offsets = input_data.len() as u32 - message_len_bytes - compare_len_bytes + 1;
+    let longest_pattern_length_bytes = input_patterns
+        .iter()
+        .map(|p| p.total_length())
+        .max()
+        .unwrap_or(0);
+
+    let total_offsets =
+        (input_data.len() as u32).saturating_sub(longest_pattern_length_bytes as u32) + 1;
     let wg_size = gpu.device.limits().max_compute_workgroup_size_x;
 
     // Choose X as large as possible
@@ -272,22 +279,73 @@ pub fn search_sha256_gpu_windows(
         match_offsets_buffer_size,
     );
 
-    let search_config_val = SearchConfig {
-        input_len_bytes: input_data.len() as u32,
-        message_len_bytes,
-        compare_len_bytes,
-    };
+    let mut all_results = Vec::new();
 
-    write_inputs(&gpu, buffers, &input_data, &search_config_val)?;
+    for (checksum_pattern_idx, &pattern) in input_patterns.iter().enumerate() {
+        // Edge case: data too small for this pattern.
+        // Rare edge-case in the very last chunk, and/or if the total length is tiny.
+        if input_data.len() < pattern.total_length() {
+            continue;
+        }
 
-    let result = dispatch_and_readback(
-        &gpu,
-        buffers,
-        algo,
-        (workgroups_x, workgroups_y),
-        packed_data_length_bytes,
-    )?;
-    Ok(result)
+        let search_config_val = SearchConfig {
+            input_len_bytes: input_data.len() as u32,
+            message_len_bytes: pattern.chunk_len as u32,
+            compare_len_bytes: pattern.checksum_len as u32,
+        };
+
+        write_inputs(
+            &gpu,
+            buffers,
+            {
+                // Don't need to re-write this on subsequent iterations.
+                if checksum_pattern_idx == 0 {
+                    Some(&input_data)
+                } else {
+                    None
+                }
+            },
+            &search_config_val,
+        )?;
+
+        let local_result = dispatch_and_readback(
+            &gpu,
+            buffers,
+            algo,
+            (workgroups_x, workgroups_y),
+            packed_data_length_bytes,
+            checksum_pattern_idx == 0, // Disable copy when on subsequent pattern iterations.
+        )?;
+
+        // Materialize matches (rare path).
+        for &relative_offset in &local_result {
+            let absolute_offset = input_data_absolute_offset + relative_offset as usize;
+
+            let chunk_and_checksum = &input_data
+                [(relative_offset as usize)..(relative_offset as usize) + pattern.total_length()];
+
+            let chunk_data = &chunk_and_checksum[..pattern.chunk_len];
+            let checksum_data = &chunk_and_checksum[pattern.chunk_len..pattern.total_length()];
+
+            debug_assert_eq!(chunk_data.len(), pattern.chunk_len);
+            debug_assert_eq!(checksum_data.len(), pattern.checksum_len);
+
+            info!(
+                "✅ Match! Offset: {}=0x{:x}, Chunk Length: {}, Chunk: {:x?}",
+                absolute_offset, absolute_offset, pattern.chunk_len, chunk_data
+            );
+
+            all_results.push(ChecksumPatternMatch {
+                chunk_len: pattern.chunk_len,
+                checksum_len: pattern.checksum_len,
+                chunk_start_offset: absolute_offset as u64,
+                chunk_data: chunk_data.to_vec(),
+                checksum_data: checksum_data.to_vec(),
+            });
+        }
+    }
+
+    Ok(all_results)
 }
 
 /// Pack input bytes into u32 words (big endian).
@@ -489,11 +547,11 @@ fn get_or_resize_buffers<'a>(
 fn write_inputs(
     gpu: &GPU,
     buffers: &mut GpuBuffers,
-    input_data: &[u8],
+    input_data: Option<&[u8]>,
     search_config_val: &SearchConfig,
 ) -> anyhow::Result<()> {
     // Write padded bytes directly from `input_data` into upload buffer.
-    {
+    if let Some(input_data) = input_data {
         let packed_data_length_bytes = get_packed_data_words_length(input_data.len()) as u64 * 4;
 
         let upload_buffer_slice = buffers
@@ -552,17 +610,20 @@ fn dispatch_and_readback(
     algo: ComputePipelineVersionWindows,
     (workgroups_x, workgroups_y): (u32, u32),
     packed_data_length_bytes: u64,
+    enable_input_buffer_copy: bool,
 ) -> anyhow::Result<Vec<u32>> {
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
 
     // Copy in the input upload buffer to the input storage buffer.
-    encoder.copy_buffer_to_buffer(
-        &buffers.input_upload_buffer,
-        0,
-        &buffers.input_storage_buffer,
-        0,
-        packed_data_length_bytes,
-    );
+    if enable_input_buffer_copy {
+        encoder.copy_buffer_to_buffer(
+            &buffers.input_upload_buffer,
+            0,
+            &buffers.input_storage_buffer,
+            0,
+            packed_data_length_bytes,
+        );
+    }
 
     // Dispatch.
     {
@@ -599,6 +660,7 @@ fn dispatch_and_readback(
     };
 
     // Hot path optimization: If no matches found, then no need to read the other buffer.
+    // This is the nominal path, as matches are very rare.
     if result_count == 0 {
         return Ok(Vec::new());
     } else if (result_count as u64) >= buffers.match_offsets_capacity {

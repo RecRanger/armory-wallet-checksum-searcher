@@ -219,6 +219,12 @@ fn create_pipeline(
                     device.limits().max_compute_workgroup_size_x as f64,
                 ),
                 ("CONFIG_ENABLE_SHA256D", if sha256d { 1.0 } else { 0.0 }),
+                ("CONFIG_STRIDE_X", {
+                    let wg_size = device.limits().max_compute_workgroup_size_x;
+                    let workgroups_x = device.limits().max_compute_workgroups_per_dimension;
+                    let stride_x = workgroups_x * wg_size;
+                    stride_x as f64
+                }),
             ],
             ..Default::default()
         },
@@ -244,7 +250,15 @@ pub fn search_sha256_gpu_windows(
 
     let total_offsets = input_data.len() as u32 - message_len_bytes - compare_len_bytes + 1;
     let wg_size = gpu.device.limits().max_compute_workgroup_size_x;
-    let num_workgroups = (total_offsets + wg_size - 1) / wg_size;
+
+    // Choose X as large as possible
+    let workgroups_x = gpu.device.limits().max_compute_workgroups_per_dimension;
+    let threads_per_row = workgroups_x * wg_size;
+
+    // Number of rows needed.
+    let workgroups_y = ((total_offsets + threads_per_row - 1) / threads_per_row)
+        // Clamp Y to device limit.
+        .min(gpu.device.limits().max_compute_workgroups_per_dimension);
 
     // Required buffer sizes.
     let match_offsets_buffer_size = get_match_offsets_buffer_size(total_offsets)?;
@@ -270,7 +284,7 @@ pub fn search_sha256_gpu_windows(
         &gpu,
         buffers,
         algo,
-        num_workgroups,
+        (workgroups_x, workgroups_y),
         packed_data_length_bytes,
     )?;
     Ok(result)
@@ -536,7 +550,7 @@ fn dispatch_and_readback(
     gpu: &GPU,
     buffers: &mut GpuBuffers,
     algo: ComputePipelineVersionWindows,
-    num_workgroups: u32,
+    (workgroups_x, workgroups_y): (u32, u32),
     packed_data_length_bytes: u64,
 ) -> anyhow::Result<Vec<u32>> {
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -555,7 +569,7 @@ fn dispatch_and_readback(
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(gpu.pipeline(algo));
         pass.set_bind_group(0, &buffers.bind_group, &[]);
-        pass.dispatch_workgroups(num_workgroups, 1, 1);
+        pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
     }
 
     // First, read the match_count buffer.
@@ -645,16 +659,17 @@ fn dispatch_and_readback(
 
 /// Max length of the input data to `search_sha256_gpu_windows()`.
 pub fn get_max_input_len_bytes() -> anyhow::Result<u32> {
-    // TODO: Could make it a 2D operation and drastically increase this.
-    let val = gpu()?.device.limits().max_compute_workgroups_per_dimension as u64
-        * gpu()?.device.limits().max_compute_workgroup_size_x as u64;
+    let limits = gpu()?.device.limits();
 
-    // Return u32::MAX or val.
-    if val > u32::MAX as u64 {
-        Ok(u32::MAX)
-    } else {
-        Ok(val as u32)
-    }
+    let threads_per_wg = limits.max_compute_workgroup_size_x as u64;
+    let max_wg = limits.max_compute_workgroups_per_dimension as u64;
+
+    let total_threads = threads_per_wg * max_wg * max_wg;
+
+    Ok(total_threads
+        .min(u32::MAX as u64)
+        .min(limits.max_buffer_size)
+        .min(limits.max_storage_buffer_binding_size as u64) as u32)
 }
 
 fn entry(binding: u32, buffer: &'_ wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {

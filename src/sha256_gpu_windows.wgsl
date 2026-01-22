@@ -5,6 +5,7 @@
 // Inject from Rust
 override CONFIG_WORKGROUP_SIZE: u32 = 256u;
 override CONFIG_ENABLE_SHA256D: bool = true;
+override CONFIG_STRIDE_X: u32; // threads per row
 
 // ============================================================
 // Bindings
@@ -211,9 +212,9 @@ fn sha256_compress(w: ptr<function, array<u32,64>>,
 // Compute entry
 // ============================================================
 
-@compute @workgroup_size(CONFIG_WORKGROUP_SIZE)
+@compute @workgroup_size(CONFIG_WORKGROUP_SIZE, 1, 1)
 fn sliding_sha256d(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let offset = gid.x;
+    let offset = gid.y * CONFIG_STRIDE_X + gid.x;
 
     if (
         (offset + search_config.message_len_bytes + search_config.compare_len_bytes)

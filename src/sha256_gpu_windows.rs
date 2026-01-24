@@ -649,6 +649,8 @@ fn dispatch_and_readback(
         .slice(..)
         .map_async(wgpu::MapMode::Read, |_| {});
 
+    // Long stall (1-5 seconds) here, waiting on this poll for completion.
+    // This is where 99% of the runtime occurs.
     gpu.device.poll(wgpu::PollType::wait_indefinitely())?;
 
     let result_count = {

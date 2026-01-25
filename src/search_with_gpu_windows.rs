@@ -15,7 +15,7 @@ pub fn search_for_checksums_gpu_windows(
     progress_bar.set_style(
         ProgressStyle::default_bar()
             .template(
-                "GPU: {spinner:.green} [{elapsed_precise}] \
+                "GPU: [{elapsed_precise}] \
                  [{bar:40.cyan/blue}] {bytes}/{total_bytes} \
                  ({binary_bytes_per_sec}) - ETA {eta}",
             )
